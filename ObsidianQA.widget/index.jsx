@@ -203,9 +203,16 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
           const isOpen = !!expanded[i];
           const isChecked = !!checked[i];
 
+          const onChatGPT = (e) => {
+            e.stopPropagation();
+            const prompt = `(${title}) ${pair.q}. Please include detail as would be appropriate to studying for Step 1`;
+            const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
+            run(`open "${url}"`);
+          };
+
           return (
             <div key={i} className="item">
-              <button
+              <div
                 className="qRow"
                 onClick={() => dispatch({ type: "TOGGLE_ANSWER", idx: i })}
               >
@@ -221,8 +228,15 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
 
                 <span className="qIndex">{i + 1}.</span>
                 <span className="qText">{pair.q}</span>
+                <button
+                  className="chatgptBtn"
+                  onClick={onChatGPT}
+                  title="Ask ChatGPT"
+                >
+                  💬
+                </button>
                 <span className="chev">{isOpen ? "▾" : "▸"}</span>
-              </button>
+              </div>
 
               {isOpen && <div className="answer">{pair.a}</div>}
             </div>
@@ -329,6 +343,22 @@ export const className = `
   .qText {
     flex: 1;
     font-size: 14px;
+  }
+
+  .chatgptBtn {
+    flex-shrink: 0;
+    padding: 4px 6px;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font-size: 14px;
+    opacity: 0.7;
+    border-radius: 6px;
+  }
+
+  .chatgptBtn:hover {
+    opacity: 1;
+    background: rgba(255,255,255,0.1);
   }
 
   .chev {
