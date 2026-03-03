@@ -10,6 +10,7 @@ export const command = `
 const fs = require("fs");
 
 const STORE = ${JSON.stringify(TROUBLE_STORE)};
+const MAX_VISIBLE = 4;
 
 function defaultStore() {
   return { version: 1, items: [] };
@@ -51,8 +52,10 @@ function shuffle(arr) {
 }
 
 function main() {
+  const refreshToken = Date.now();
+
   if (!fs.existsSync(STORE)) {
-    console.log(JSON.stringify({ items: [] }));
+    console.log(JSON.stringify({ items: [], candidateItems: [], refreshToken }));
     return;
   }
 
@@ -73,9 +76,13 @@ function main() {
   }
 
   const store = sanitizeStore(parsed);
-  const items = shuffle(store.items.slice());
+  const candidateItems = shuffle(store.items.slice());
+  const items =
+    candidateItems.length <= MAX_VISIBLE
+      ? candidateItems
+      : candidateItems.slice(0, MAX_VISIBLE);
 
-  console.log(JSON.stringify({ items }));
+  console.log(JSON.stringify({ items, candidateItems, refreshToken }));
 }
 
 main();
@@ -84,6 +91,38 @@ EOF
 
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
+
+const MAX_VISIBLE = 5;
+
+const pickVisibleItems = (items, lastShownIds) => {
+  if (!Array.isArray(items)) return [];
+  if (items.length <= MAX_VISIBLE) return items;
+
+  const prevSet = new Set(
+    Array.isArray(lastShownIds)
+      ? lastShownIds.filter((id) => typeof id === "string" && id)
+      : [],
+  );
+
+  const neverShown = [];
+  const previouslyShown = [];
+  for (const item of items) {
+    const id = item && typeof item.id === "string" ? item.id : "";
+    if (!id) continue;
+    if (prevSet.has(id)) {
+      previouslyShown.push(item);
+    } else {
+      neverShown.push(item);
+    }
+  }
+
+  const chosen = neverShown.slice(0, MAX_VISIBLE);
+  if (chosen.length < MAX_VISIBLE) {
+    chosen.push(...previouslyShown.slice(0, MAX_VISIBLE - chosen.length));
+  }
+
+  return chosen;
+};
 
 const removeTroubleItem = (id, dispatch) => {
   const nodeScript = `
@@ -198,6 +237,8 @@ export const initialState = {
   storeError: null,
   expanded: {},
   removed: {},
+  lastShownIds: [],
+  lastRefreshToken: null,
 };
 
 export const updateState = (event, prev) => {
@@ -245,13 +286,57 @@ export const updateState = (event, prev) => {
   }
 
   if (event && typeof event.output === "string") {
+    let nextOutput = event.output;
+    let nextLastShownIds = Array.isArray(prev.lastShownIds)
+      ? prev.lastShownIds
+      : [];
+    let nextRefreshToken = prev.lastRefreshToken ?? null;
+
+    try {
+      const parsed = JSON.parse((event.output || "").trim());
+      if (parsed && !parsed.error && typeof parsed === "object") {
+        const token =
+          parsed.refreshToken === null || parsed.refreshToken === undefined
+            ? null
+            : String(parsed.refreshToken);
+        const canRotate = token !== null && token !== prev.lastRefreshToken;
+
+        const candidateItems = Array.isArray(parsed.candidateItems)
+          ? parsed.candidateItems
+          : Array.isArray(parsed.items)
+            ? parsed.items
+            : [];
+
+        const items = canRotate
+          ? pickVisibleItems(candidateItems, prev.lastShownIds)
+          : Array.isArray(parsed.items)
+            ? parsed.items
+            : [];
+
+        nextLastShownIds = items
+          .map((item) => (item && typeof item.id === "string" ? item.id : ""))
+          .filter(Boolean);
+        nextRefreshToken = token;
+
+        nextOutput = JSON.stringify({
+          ...parsed,
+          items,
+          refreshToken: parsed.refreshToken ?? null,
+        });
+      }
+    } catch {
+      // Preserve raw output; render handles malformed JSON safely.
+    }
+
     return {
       ...prev,
-      output: event.output,
+      output: nextOutput,
       error: null,
       storeError: null,
       expanded: {},
       removed: {},
+      lastShownIds: nextLastShownIds,
+      lastRefreshToken: nextRefreshToken,
     };
   }
 
