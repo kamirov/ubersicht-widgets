@@ -6,7 +6,7 @@ const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const NOTES_DIR =
   "/Users/kamirov/Library/CloudStorage/GoogleDrive-andrei.khramtsov@gmail.com/My Drive/Hole In The Ground/👨‍⚕️ Medicine/Exploring";
 
-// --------------- Data fetch (stdout -> JSON) ---------------
+// ===================== DATA FETCH =====================
 export const command = `
 "${NODE}" <<'EOF'
 const fs = require("fs");
@@ -19,6 +19,7 @@ function walk(dir) {
   let list;
   try { list = fs.readdirSync(dir, { withFileTypes: true }); }
   catch { return results; }
+
   for (const entry of list) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) results.push(...walk(full));
@@ -45,9 +46,6 @@ function extractSection(text, header) {
   return section.trim();
 }
 
-// Split numbered list like:
-// 1. ...
-// 2. ...
 function splitNumberedList(sectionText) {
   const text = (sectionText || "").replace(/\\r\\n/g, "\\n").trim();
   if (!text) return [];
@@ -56,7 +54,8 @@ function splitNumberedList(sectionText) {
   const re = /^\\s*(\\d+)\\.(\\s+|$)/gm;
   let m;
   while ((m = re.exec(text)) !== null) starts.push(m.index);
-  if (starts.length === 0) return null; // cannot parse
+
+  if (starts.length === 0) return null;
 
   const items = [];
   for (let i = 0; i < starts.length; i++) {
@@ -67,28 +66,6 @@ function splitNumberedList(sectionText) {
     items.push(chunk.trim());
   }
   return items;
-}
-
-function parseFile(file) {
-  let text;
-  try { text = fs.readFileSync(file, "utf8"); } catch { return null; }
-
-  const qSection = extractSection(text, "Questions");
-  const aSection = extractSection(text, "Answers");
-  if (!qSection || !aSection) return null;
-
-  const qs = splitNumberedList(qSection);
-  const as = splitNumberedList(aSection);
-
-  if (qs === null || as === null) return null;
-  if (qs.length === 0 || as.length === 0) return null;
-  if (qs.length !== as.length) return null;
-
-  return {
-    file: path.basename(file),
-    path: file,
-    pairs: qs.map((q, i) => ({ q, a: as[i] }))
-  };
 }
 
 function main() {
@@ -104,48 +81,81 @@ function main() {
   }
 
   for (const file of files) {
-    const parsed = parseFile(file);
-    if (parsed) {
-      console.log(JSON.stringify(parsed));
-      return;
-    }
+    let text;
+    try { text = fs.readFileSync(file, "utf8"); }
+    catch { continue; }
+
+    const qSection = extractSection(text, "Questions");
+    const aSection = extractSection(text, "Answers");
+    if (!qSection || !aSection) continue;
+
+    const qs = splitNumberedList(qSection);
+    const as = splitNumberedList(aSection);
+
+    if (qs === null || as === null) continue;
+    if (qs.length === 0 || as.length === 0) continue;
+    if (qs.length !== as.length) continue;
+
+    const pairs = qs.map((q, i) => ({ q, a: as[i] }));
+
+    console.log(JSON.stringify({
+      file: path.basename(file),
+      path: file,
+      pairs
+    }));
+    return;
   }
 
-  console.log(JSON.stringify({ error: "No notes found with parseable numbered Questions/Answers of equal length." }));
+  console.log(JSON.stringify({
+    error: "No notes found with parseable numbered Questions/Answers of equal length."
+  }));
 }
 
 main();
 EOF
 `;
 
-// --------------- Widget state (no React hooks) ---------------
+// ===================== STATE =====================
 export const initialState = {
+  output: "",
+  error: null,
   expanded: {},
   checked: {},
 };
 
 export const updateState = (event, prev) => {
   if (event && event.type === "TOGGLE_ANSWER") {
-    const nextExpanded = { ...(prev.expanded || {}) };
-    nextExpanded[event.idx] = !nextExpanded[event.idx];
+    const idx = event.idx;
+    const nextExpanded = { ...prev.expanded };
+    nextExpanded[idx] = !nextExpanded[idx];
     return { ...prev, expanded: nextExpanded };
   }
 
   if (event && event.type === "TOGGLE_CHECK") {
-    const nextChecked = { ...(prev.checked || {}) };
-    nextChecked[event.idx] = !nextChecked[event.idx];
+    const idx = event.idx;
+    const nextChecked = { ...prev.checked };
+    nextChecked[idx] = !nextChecked[idx];
     return { ...prev, checked: nextChecked };
   }
 
-  // When new command output arrives, reset per-note state
+  if (event && event.error) {
+    return { ...prev, error: String(event.error) };
+  }
+
   if (event && typeof event.output === "string") {
-    return { ...prev, expanded: {}, checked: {} };
+    return {
+      ...prev,
+      output: event.output,
+      error: null,
+      expanded: {},
+      checked: {},
+    };
   }
 
   return prev;
 };
 
-// --------------- UI ---------------
+// ===================== UI =====================
 export const render = ({ output, error, expanded, checked }, dispatch) => {
   if (error) {
     return (
@@ -159,10 +169,7 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
   try {
     data = JSON.parse((output || "").trim());
   } catch {
-    data = {
-      error: output ? "Could not parse JSON output." : null,
-      raw: output,
-    };
+    data = { error: "Could not parse JSON output.", raw: output };
   }
 
   if (!data || data.error) {
@@ -170,17 +177,6 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
       <div className="card">
         <div className="error">{data?.error || "No data yet."}</div>
         {data?.raw ? <pre className="raw">{data.raw}</pre> : null}
-      </div>
-    );
-  }
-
-  if (!Array.isArray(data.pairs)) {
-    return (
-      <div className="card">
-        <div className="error">
-          Unexpected data format (missing pairs array).
-        </div>
-        <pre className="raw">{JSON.stringify(data, null, 2)}</pre>
       </div>
     );
   }
@@ -197,37 +193,30 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
     <div className="card">
       <div className="header">
         <div className="title">{title}</div>
-        <div className="btnRow">
-          <button
-            className="openBtn"
-            onClick={onOpen}
-            title="Open note in Obsidian"
-          >
-            Open
-          </button>
-        </div>
+        <button className="openBtn" onClick={onOpen}>
+          Open
+        </button>
       </div>
 
       <div className="list">
         {data.pairs.map((pair, i) => {
-          const isOpen = !!(expanded && expanded[i]);
+          const isOpen = !!expanded[i];
+          const isChecked = !!checked[i];
+
           return (
-            <div key={i} className={`item ${isOpen ? "expanded" : ""}`}>
+            <div key={i} className="item">
               <button
                 className="qRow"
                 onClick={() => dispatch({ type: "TOGGLE_ANSWER", idx: i })}
-                title="Toggle answer"
               >
                 <span
-                  className={`cb ${checked && checked[i] ? "cbOn" : ""}`}
-                  title="Mark as got it right"
+                  className={`cb ${isChecked ? "cbOn" : ""}`}
                   onClick={(e) => {
-                    e.preventDefault();
                     e.stopPropagation();
                     dispatch({ type: "TOGGLE_CHECK", idx: i });
                   }}
                 >
-                  {checked && checked[i] ? "✓" : ""}
+                  {isChecked ? "✓" : ""}
                 </span>
 
                 <span className="qIndex">{i + 1}.</span>
@@ -235,7 +224,7 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
                 <span className="chev">{isOpen ? "▾" : "▸"}</span>
               </button>
 
-              {isOpen ? <div className="answer">{pair.a}</div> : null}
+              {isOpen && <div className="answer">{pair.a}</div>}
             </div>
           );
         })}
@@ -244,6 +233,7 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
   );
 };
 
+// ===================== STYLE =====================
 export const className = `
   left: 24px;
   top: 24px;
@@ -265,39 +255,25 @@ export const className = `
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
     margin-bottom: 10px;
   }
 
   .title {
     font-size: 18px;
     font-weight: 650;
-    opacity: 0.97;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .btnRow {
-    display: flex;
-    gap: 8px;
-    align-items: center;
   }
 
   .openBtn {
-    appearance: none;
     border: 1px solid rgba(255,255,255,0.18);
     background: rgba(255,255,255,0.10);
-    color: rgba(255,255,255,0.92);
+    color: white;
     border-radius: 10px;
     padding: 6px 10px;
-    font-size: 13px;
-    font-weight: 600;
     cursor: pointer;
   }
+
   .openBtn:hover {
-    background: rgba(255,255,255,0.16);
-    border-color: rgba(255,255,255,0.26);
+    background: rgba(255,255,255,0.18);
   }
 
   .list {
@@ -307,96 +283,67 @@ export const className = `
   }
 
   .item {
-    border: 1px solid rgba(255,255,255,0.10);
-    background: rgba(255,255,255,0.06);
     border-radius: 12px;
+    background: rgba(255,255,255,0.06);
     overflow: hidden;
   }
 
   .qRow {
     width: 100%;
-    text-align: left;
     display: flex;
     align-items: flex-start;
     gap: 10px;
-
-    appearance: none;
+    padding: 10px 12px;
     border: 0;
     background: transparent;
     color: inherit;
-    padding: 10px 12px;
+    text-align: left;
     cursor: pointer;
   }
 
   .qRow:hover {
-    background: rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.08);
   }
 
   .cb {
     width: 18px;
     height: 18px;
     border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.22);
+    border: 1px solid rgba(255,255,255,0.25);
     background: rgba(255,255,255,0.08);
-    display: inline-flex;
+    display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 13px;
-    line-height: 1;
-    margin-top: 2px;
-    flex: 0 0 auto;
-    opacity: 0.9;
-  }
-
-  .cb:hover {
-    background: rgba(255,255,255,0.14);
-    border-color: rgba(255,255,255,0.30);
+    font-size: 12px;
   }
 
   .cbOn {
-    background: rgba(255,255,255,0.22);
-    border-color: rgba(255,255,255,0.38);
-    opacity: 1;
+    background: rgba(255,255,255,0.25);
   }
 
   .qIndex {
-    opacity: 0.75;
+    opacity: 0.7;
     font-weight: 600;
-    min-width: 24px;
   }
 
   .qText {
     flex: 1;
     font-size: 14px;
-    line-height: 1.45;
   }
 
   .chev {
-    opacity: 0.75;
-    font-size: 14px;
-    padding-left: 6px;
+    opacity: 0.7;
   }
 
   .answer {
     padding: 12px 12px 12px 46px;
     font-size: 14px;
-    line-height: 1.5;
-    opacity: 0.92;
-    border-top: 1px solid rgba(255,255,255,0.10);
-    background: rgba(0,0,0,0.10);
+    opacity: 0.9;
+    border-top: 1px solid rgba(255,255,255,0.1);
     white-space: pre-wrap;
   }
 
   .error {
     color: rgba(255,120,120,0.95);
-    white-space: pre-wrap;
-    font-size: 13px;
-    margin-bottom: 8px;
-  }
-
-  .raw {
-    opacity: 0.7;
-    font-size: 12px;
-    white-space: pre-wrap;
   }
 `;
