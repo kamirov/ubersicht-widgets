@@ -6,6 +6,9 @@ const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const NOTES_DIR =
   "/Users/kamirov/Library/CloudStorage/GoogleDrive-andrei.khramtsov@gmail.com/My Drive/Hole In The Ground/👨‍⚕️ Medicine/Exploring";
 
+const TROUBLE_STORE =
+  "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";
+
 // ===================== DATA FETCH =====================
 export const command = `
 "${NODE}" <<'EOF'
@@ -115,12 +118,362 @@ main();
 EOF
 `;
 
+// ===================== HELPERS =====================
+const escapeForSingleQuotedShell = (value) =>
+  String(value).replace(/'/g, "'\\''");
+
+const sha1 = (value) => {
+  const msg = unescape(encodeURIComponent(String(value)));
+  const words = [];
+  for (let i = 0; i < msg.length; i++) {
+    words[i >> 2] |= msg.charCodeAt(i) << (24 - (i % 4) * 8);
+  }
+  words[msg.length >> 2] |= 0x80 << (24 - (msg.length % 4) * 8);
+  words[(((msg.length + 8) >> 6) + 1) * 16 - 1] = msg.length * 8;
+
+  const w = new Array(80);
+  let h0 = 0x67452301;
+  let h1 = 0xefcdab89;
+  let h2 = 0x98badcfe;
+  let h3 = 0x10325476;
+  let h4 = 0xc3d2e1f0;
+
+  for (let i = 0; i < words.length; i += 16) {
+    for (let t = 0; t < 16; t++) w[t] = words[i + t] | 0;
+    for (let t = 16; t < 80; t++) {
+      const n = w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16];
+      w[t] = (n << 1) | (n >>> 31);
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+
+    for (let t = 0; t < 80; t++) {
+      let f;
+      let k;
+      if (t < 20) {
+        f = (b & c) | (~b & d);
+        k = 0x5a827999;
+      } else if (t < 40) {
+        f = b ^ c ^ d;
+        k = 0x6ed9eba1;
+      } else if (t < 60) {
+        f = (b & c) | (b & d) | (c & d);
+        k = 0x8f1bbcdc;
+      } else {
+        f = b ^ c ^ d;
+        k = 0xca62c1d6;
+      }
+
+      const temp = (((a << 5) | (a >>> 27)) + f + e + k + (w[t] | 0)) | 0;
+      e = d;
+      d = c;
+      c = (b << 30) | (b >>> 2);
+      b = a;
+      a = temp;
+    }
+
+    h0 = (h0 + a) | 0;
+    h1 = (h1 + b) | 0;
+    h2 = (h2 + c) | 0;
+    h3 = (h3 + d) | 0;
+    h4 = (h4 + e) | 0;
+  }
+
+  const hex = (n) => (n >>> 0).toString(16).padStart(8, "0");
+  return [hex(h0), hex(h1), hex(h2), hex(h3), hex(h4)].join("");
+};
+
+const makeItemId = (notePath, question) => sha1(`${notePath || ""}::${question || ""}`);
+
+const parseOutputData = (output) => {
+  try {
+    const parsed = JSON.parse((output || "").trim());
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const loadVisibleStoreMembership = (ids, dispatch) => {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    dispatch({ type: "STORE_SYNCED", ids: {}, syncError: null });
+    return;
+  }
+
+  const nodeScript = `
+const fs = require("fs");
+
+const STORE = '${escapeForSingleQuotedShell(TROUBLE_STORE)}';
+const TARGET_IDS = ${JSON.stringify(ids)};
+
+function isValidStore(data) {
+  return (
+    data &&
+    typeof data === "object" &&
+    Number(data.version) === 1 &&
+    Array.isArray(data.items)
+  );
+}
+
+function main() {
+  if (!fs.existsSync(STORE)) {
+    const empty = {};
+    for (const id of TARGET_IDS) empty[id] = false;
+    console.log(JSON.stringify({ ids: empty }));
+    return;
+  }
+
+  let raw;
+  try {
+    raw = fs.readFileSync(STORE, "utf8");
+  } catch (err) {
+    console.log(JSON.stringify({ error: "Could not read trouble store: " + String(err && err.message ? err.message : err) }));
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.log(JSON.stringify({ error: "Trouble store JSON is malformed." }));
+    return;
+  }
+
+  if (!isValidStore(parsed)) {
+    console.log(JSON.stringify({ error: "Trouble store has invalid structure." }));
+    return;
+  }
+
+  const lookup = new Set(parsed.items.map((item) => item && item.id).filter(Boolean));
+  const out = {};
+  for (const id of TARGET_IDS) out[id] = lookup.has(id);
+
+  console.log(JSON.stringify({ ids: out }));
+}
+
+main();
+`;
+
+  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
+    .then((result) => {
+      try {
+        const data = JSON.parse(String(result || "").trim());
+        if (data && data.error) {
+          dispatch({ type: "STORE_SYNCED", ids: {}, syncError: String(data.error) });
+          return;
+        }
+        dispatch({
+          type: "STORE_SYNCED",
+          ids: data && data.ids && typeof data.ids === "object" ? data.ids : {},
+          syncError: null,
+        });
+      } catch {
+        dispatch({ type: "STORE_SYNCED", ids: {}, syncError: "Could not parse store sync response." });
+      }
+    })
+    .catch((err) => {
+      dispatch({
+        type: "STORE_SYNCED",
+        ids: {},
+        syncError: `Store sync failed: ${String(err && err.message ? err.message : err)}`,
+      });
+    });
+};
+
+const mutateTroubleStore = ({ action, item }, dispatch) => {
+  const payload = { action, item };
+
+  const nodeScript = `
+const fs = require("fs");
+const path = require("path");
+
+const STORE = '${escapeForSingleQuotedShell(TROUBLE_STORE)}';
+const TMP = STORE + ".tmp";
+const BAK = STORE + ".bak";
+const PAYLOAD = ${JSON.stringify(payload)};
+
+function defaultStore() {
+  return { version: 1, items: [] };
+}
+
+function sanitizeStore(input) {
+  if (!input || typeof input !== "object") return defaultStore();
+  if (Number(input.version) !== 1 || !Array.isArray(input.items)) return defaultStore();
+
+  const out = [];
+  const seen = new Set();
+  for (const item of input.items) {
+    if (!item || typeof item !== "object") continue;
+    const id = typeof item.id === "string" ? item.id : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    out.push({
+      id,
+      topic: typeof item.topic === "string" ? item.topic : "",
+      question: typeof item.question === "string" ? item.question : "",
+      answer: typeof item.answer === "string" ? item.answer : "",
+      notePath: typeof item.notePath === "string" ? item.notePath : "",
+      noteFile: typeof item.noteFile === "string" ? item.noteFile : "",
+      createdAt: typeof item.createdAt === "string" ? item.createdAt : new Date().toISOString(),
+      updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : new Date().toISOString(),
+      timesMarked: Number.isFinite(item.timesMarked) && item.timesMarked > 0 ? Math.floor(item.timesMarked) : 1,
+    });
+  }
+
+  return { version: 1, items: out };
+}
+
+function loadStore() {
+  if (!fs.existsSync(STORE)) return defaultStore();
+
+  let raw;
+  try {
+    raw = fs.readFileSync(STORE, "utf8");
+  } catch {
+    return defaultStore();
+  }
+
+  try {
+    return sanitizeStore(JSON.parse(raw));
+  } catch {
+    try { fs.copyFileSync(STORE, BAK); } catch {}
+    return defaultStore();
+  }
+}
+
+function writeStore(store) {
+  const dir = path.dirname(STORE);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(TMP, JSON.stringify(store, null, 2) + "\\n", "utf8");
+  fs.renameSync(TMP, STORE);
+}
+
+function main() {
+  const payload = PAYLOAD || {};
+  const action = payload.action;
+  const item = payload.item || {};
+
+  if (action !== "add" && action !== "remove") {
+    console.log(JSON.stringify({ error: "Invalid action." }));
+    return;
+  }
+
+  if (!item || typeof item.id !== "string" || !item.id) {
+    console.log(JSON.stringify({ error: "Invalid item id." }));
+    return;
+  }
+
+  const store = loadStore();
+  const now = new Date().toISOString();
+  const idx = store.items.findIndex((it) => it.id === item.id);
+
+  if (action === "add") {
+    if (idx >= 0) {
+      const prev = store.items[idx];
+      store.items[idx] = {
+        ...prev,
+        topic: typeof item.topic === "string" ? item.topic : prev.topic,
+        question: typeof item.question === "string" ? item.question : prev.question,
+        answer: typeof item.answer === "string" ? item.answer : prev.answer,
+        notePath: typeof item.notePath === "string" ? item.notePath : prev.notePath,
+        noteFile: typeof item.noteFile === "string" ? item.noteFile : prev.noteFile,
+        updatedAt: now,
+        timesMarked: (Number.isFinite(prev.timesMarked) ? prev.timesMarked : 1) + 1,
+      };
+    } else {
+      store.items.push({
+        id: item.id,
+        topic: typeof item.topic === "string" ? item.topic : "",
+        question: typeof item.question === "string" ? item.question : "",
+        answer: typeof item.answer === "string" ? item.answer : "",
+        notePath: typeof item.notePath === "string" ? item.notePath : "",
+        noteFile: typeof item.noteFile === "string" ? item.noteFile : "",
+        createdAt: now,
+        updatedAt: now,
+        timesMarked: 1,
+      });
+    }
+  }
+
+  if (action === "remove") {
+    if (idx >= 0) store.items.splice(idx, 1);
+  }
+
+  writeStore(store);
+  console.log(JSON.stringify({
+    ok: true,
+    id: item.id,
+    checked: action === "add",
+    itemCount: store.items.length
+  }));
+}
+
+try {
+  main();
+} catch (err) {
+  console.log(JSON.stringify({ error: String(err && err.message ? err.message : err) }));
+}
+`;
+
+  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
+    .then((result) => {
+      try {
+        const data = JSON.parse(String(result || "").trim());
+        if (!data || data.error) {
+          dispatch({
+            type: "STORE_MUTATION_RESULT",
+            ok: false,
+            id: item.id,
+            expectedChecked: action === "add",
+            error: data && data.error ? String(data.error) : "Mutation failed",
+          });
+          return;
+        }
+
+        dispatch({
+          type: "STORE_MUTATION_RESULT",
+          ok: true,
+          id: String(data.id || item.id),
+          checked: !!data.checked,
+          error: null,
+        });
+      } catch {
+        dispatch({
+          type: "STORE_MUTATION_RESULT",
+          ok: false,
+          id: item.id,
+          expectedChecked: action === "add",
+          error: "Could not parse mutation response.",
+        });
+      }
+    })
+    .catch((err) => {
+      dispatch({
+        type: "STORE_MUTATION_RESULT",
+        ok: false,
+        id: item.id,
+        expectedChecked: action === "add",
+        error: `Mutation command failed: ${String(err && err.message ? err.message : err)}`,
+      });
+    });
+};
+
 // ===================== STATE =====================
 export const initialState = {
   output: "",
   error: null,
+  storeError: null,
   expanded: {},
   checked: {},
+  persistedIds: {},
+  visibleIds: [],
+  syncingStore: false,
+  syncedKey: "",
 };
 
 export const updateState = (event, prev) => {
@@ -131,11 +484,59 @@ export const updateState = (event, prev) => {
     return { ...prev, expanded: nextExpanded };
   }
 
-  if (event && event.type === "TOGGLE_CHECK") {
-    const idx = event.idx;
-    const nextChecked = { ...prev.checked };
-    nextChecked[idx] = !nextChecked[idx];
-    return { ...prev, checked: nextChecked };
+  if (event && event.type === "SYNC_STORE_START") {
+    return { ...prev, syncingStore: true, storeError: null };
+  }
+
+  if (event && event.type === "STORE_SYNCED") {
+    return {
+      ...prev,
+      syncingStore: false,
+      persistedIds: event.ids && typeof event.ids === "object" ? event.ids : {},
+      syncedKey: Array.isArray(prev.visibleIds) ? prev.visibleIds.join("|") : "",
+      storeError: event.syncError || null,
+    };
+  }
+
+  if (event && event.type === "TOGGLE_CHECK_OPTIMISTIC") {
+    const id = String(event.id || "");
+    if (!id) return prev;
+
+    const nextChecked = { ...prev.checked, [id]: !!event.nextChecked };
+    const nextPersisted = { ...prev.persistedIds, [id]: !!event.nextChecked };
+
+    return {
+      ...prev,
+      checked: nextChecked,
+      persistedIds: nextPersisted,
+      storeError: null,
+    };
+  }
+
+  if (event && event.type === "STORE_MUTATION_RESULT") {
+    const id = String(event.id || "");
+    if (!id) return prev;
+
+    if (!event.ok) {
+      const rollbackChecked = { ...prev.checked, [id]: !event.expectedChecked };
+      const rollbackPersisted = { ...prev.persistedIds, [id]: !event.expectedChecked };
+      return {
+        ...prev,
+        checked: rollbackChecked,
+        persistedIds: rollbackPersisted,
+        storeError: String(event.error || "Trouble store mutation failed."),
+      };
+    }
+
+    const nextChecked = { ...prev.checked, [id]: !!event.checked };
+    const nextPersisted = { ...prev.persistedIds, [id]: !!event.checked };
+
+    return {
+      ...prev,
+      checked: nextChecked,
+      persistedIds: nextPersisted,
+      storeError: null,
+    };
   }
 
   if (event && event.error) {
@@ -143,12 +544,27 @@ export const updateState = (event, prev) => {
   }
 
   if (event && typeof event.output === "string") {
+    const parsed = parseOutputData(event.output);
+    const nextVisible = [];
+
+    if (parsed && !parsed.error && Array.isArray(parsed.pairs)) {
+      const notePath = typeof parsed.path === "string" ? parsed.path : "";
+      for (const pair of parsed.pairs) {
+        if (!pair || typeof pair.q !== "string") continue;
+        nextVisible.push(makeItemId(notePath, pair.q));
+      }
+    }
+
     return {
       ...prev,
       output: event.output,
       error: null,
+      storeError: null,
       expanded: {},
       checked: {},
+      visibleIds: nextVisible,
+      syncingStore: false,
+      syncedKey: "",
     };
   }
 
@@ -156,7 +572,10 @@ export const updateState = (event, prev) => {
 };
 
 // ===================== UI =====================
-export const render = ({ output, error, expanded, checked }, dispatch) => {
+export const render = (
+  { output, error, storeError, expanded, checked, persistedIds, visibleIds, syncingStore, syncedKey },
+  dispatch,
+) => {
   if (error) {
     return (
       <div className="card">
@@ -172,6 +591,12 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
     data = { error: "Could not parse JSON output.", raw: output };
   }
 
+  const visibleKey = Array.isArray(visibleIds) ? visibleIds.join("|") : "";
+  if (visibleKey && visibleKey !== syncedKey && !syncingStore) {
+    dispatch({ type: "SYNC_STORE_START" });
+    loadVisibleStoreMembership(visibleIds, dispatch);
+  }
+
   if (!data || data.error) {
     return (
       <div className="card">
@@ -181,19 +606,27 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
     );
   }
 
+  if (!Array.isArray(data.pairs)) {
+    return (
+      <div className="card">
+        <div className="error">Unexpected data shape: "pairs" is missing.</div>
+      </div>
+    );
+  }
+
   const title = (data.file || "").replace(/\.md$/i, "");
   const obsidianUrl = `obsidian://open?path=${encodeURIComponent(data.path || "")}`;
 
   const onOpen = (e) => {
     e.stopPropagation();
-    run(`open "${obsidianUrl}"`);
+    run(`open '${escapeForSingleQuotedShell(obsidianUrl)}'`);
   };
 
   const onTopicChatGPT = (e) => {
     e.stopPropagation();
     const prompt = `Tell me about ${title}. I'm studying for USMLE Step 1, so keep things relevant`;
     const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
-    run(`open "${url}"`);
+    run(`open '${escapeForSingleQuotedShell(url)}'`);
   };
 
   return (
@@ -214,36 +647,61 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
         </div>
       </div>
 
+      {storeError ? <div className="warn">{storeError}</div> : null}
+
       <div className="list">
         {data.pairs.map((pair, i) => {
+          const safePair = pair && typeof pair === "object" ? pair : { q: "", a: "" };
+          const question = typeof safePair.q === "string" ? safePair.q : "";
+          const answer = typeof safePair.a === "string" ? safePair.a : "";
+          const id = makeItemId(data.path || "", question);
+
           const isOpen = !!expanded[i];
-          const isChecked = !!checked[i];
+          const optimistic = Object.prototype.hasOwnProperty.call(checked, id) ? checked[id] : null;
+          const persisted = !!persistedIds[id];
+          const isChecked = optimistic === null ? persisted : !!optimistic;
 
           const onChatGPT = (e) => {
             e.stopPropagation();
-            const prompt = `(${title}) ${pair.q}. Please include detail as would be appropriate to studying for Step 1`;
+            const prompt = `(${title}) ${question}. Please include detail as would be appropriate to studying for Step 1`;
             const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
-            run(`open "${url}"`);
+            run(`open '${escapeForSingleQuotedShell(url)}'`);
+          };
+
+          const onToggleCheck = (e) => {
+            e.stopPropagation();
+            const nextChecked = !isChecked;
+
+            dispatch({ type: "TOGGLE_CHECK_OPTIMISTIC", id, nextChecked });
+
+            mutateTroubleStore(
+              {
+                action: nextChecked ? "add" : "remove",
+                item: {
+                  id,
+                  topic: title,
+                  question,
+                  answer,
+                  notePath: data.path || "",
+                  noteFile: data.file || "",
+                },
+              },
+              dispatch,
+            );
           };
 
           return (
-            <div key={i} className="item">
+            <div key={id || i} className="item">
               <div
                 className="qRow"
                 onClick={() => dispatch({ type: "TOGGLE_ANSWER", idx: i })}
               >
-                <span
-                  className={`cb ${isChecked ? "cbOn" : ""}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    dispatch({ type: "TOGGLE_CHECK", idx: i });
-                  }}
-                >
+                <span className={`cb ${isChecked ? "cbOn" : ""}`} onClick={onToggleCheck}>
                   {isChecked ? "✓" : ""}
                 </span>
 
                 <span className="qIndex">{i + 1}.</span>
-                <span className="qText">{pair.q}</span>
+                <span className="qText">{question}</span>
                 <button
                   className="chatgptBtn"
                   onClick={onChatGPT}
@@ -254,7 +712,7 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
                 <span className="chev">{isOpen ? "▾" : "▸"}</span>
               </div>
 
-              {isOpen && <div className="answer">{pair.a}</div>}
+              {isOpen && <div className="answer">{answer}</div>}
             </div>
           );
         })}
@@ -325,6 +783,16 @@ export const className = `
 
   .topicChatgptBtn:hover {
     background: rgba(255,255,255,0.18);
+  }
+
+  .warn {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    color: rgba(255, 196, 120, 0.98);
+    background: rgba(120, 60, 0, 0.28);
+    border: 1px solid rgba(255, 196, 120, 0.2);
+    font-size: 13px;
   }
 
   .list {
