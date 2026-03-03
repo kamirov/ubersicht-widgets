@@ -92,7 +92,7 @@ EOF
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
 
-const MAX_VISIBLE = 5;
+const MAX_VISIBLE = 4;
 
 const pickVisibleItems = (items, lastShownIds) => {
   if (!Array.isArray(items)) return [];
