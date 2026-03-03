@@ -187,7 +187,8 @@ const sha1 = (value) => {
   return [hex(h0), hex(h1), hex(h2), hex(h3), hex(h4)].join("");
 };
 
-const makeItemId = (notePath, question) => sha1(`${notePath || ""}::${question || ""}`);
+const makeItemId = (notePath, question) =>
+  sha1(`${notePath || ""}::${question || ""}`);
 
 const parseOutputData = (output) => {
   try {
@@ -263,7 +264,11 @@ main();
       try {
         const data = JSON.parse(String(result || "").trim());
         if (data && data.error) {
-          dispatch({ type: "STORE_SYNCED", ids: {}, syncError: String(data.error) });
+          dispatch({
+            type: "STORE_SYNCED",
+            ids: {},
+            syncError: String(data.error),
+          });
           return;
         }
         dispatch({
@@ -272,7 +277,11 @@ main();
           syncError: null,
         });
       } catch {
-        dispatch({ type: "STORE_SYNCED", ids: {}, syncError: "Could not parse store sync response." });
+        dispatch({
+          type: "STORE_SYNCED",
+          ids: {},
+          syncError: "Could not parse store sync response.",
+        });
       }
     })
     .catch((err) => {
@@ -493,7 +502,9 @@ export const updateState = (event, prev) => {
       ...prev,
       syncingStore: false,
       persistedIds: event.ids && typeof event.ids === "object" ? event.ids : {},
-      syncedKey: Array.isArray(prev.visibleIds) ? prev.visibleIds.join("|") : "",
+      syncedKey: Array.isArray(prev.visibleIds)
+        ? prev.visibleIds.join("|")
+        : "",
       storeError: event.syncError || null,
     };
   }
@@ -519,7 +530,10 @@ export const updateState = (event, prev) => {
 
     if (!event.ok) {
       const rollbackChecked = { ...prev.checked, [id]: !event.expectedChecked };
-      const rollbackPersisted = { ...prev.persistedIds, [id]: !event.expectedChecked };
+      const rollbackPersisted = {
+        ...prev.persistedIds,
+        [id]: !event.expectedChecked,
+      };
       return {
         ...prev,
         checked: rollbackChecked,
@@ -573,7 +587,17 @@ export const updateState = (event, prev) => {
 
 // ===================== UI =====================
 export const render = (
-  { output, error, storeError, expanded, checked, persistedIds, visibleIds, syncingStore, syncedKey },
+  {
+    output,
+    error,
+    storeError,
+    expanded,
+    checked,
+    persistedIds,
+    visibleIds,
+    syncingStore,
+    syncedKey,
+  },
   dispatch,
 ) => {
   if (error) {
@@ -651,13 +675,16 @@ export const render = (
 
       <div className="list">
         {data.pairs.map((pair, i) => {
-          const safePair = pair && typeof pair === "object" ? pair : { q: "", a: "" };
+          const safePair =
+            pair && typeof pair === "object" ? pair : { q: "", a: "" };
           const question = typeof safePair.q === "string" ? safePair.q : "";
           const answer = typeof safePair.a === "string" ? safePair.a : "";
           const id = makeItemId(data.path || "", question);
 
           const isOpen = !!expanded[i];
-          const optimistic = Object.prototype.hasOwnProperty.call(checked, id) ? checked[id] : null;
+          const optimistic = Object.prototype.hasOwnProperty.call(checked, id)
+            ? checked[id]
+            : null;
           const persisted = !!persistedIds[id];
           const isChecked = optimistic === null ? persisted : !!optimistic;
 
@@ -696,7 +723,10 @@ export const render = (
                 className="qRow"
                 onClick={() => dispatch({ type: "TOGGLE_ANSWER", idx: i })}
               >
-                <span className={`cb ${isChecked ? "cbOn" : ""}`} onClick={onToggleCheck}>
+                <span
+                  className={`cb ${isChecked ? "cbOn" : ""}`}
+                  onClick={onToggleCheck}
+                >
                   {isChecked ? "✓" : ""}
                 </span>
 

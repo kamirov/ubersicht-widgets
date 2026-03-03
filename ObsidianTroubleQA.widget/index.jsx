@@ -1,6 +1,6 @@
 import { run } from "uebersicht";
 
-export const refreshFrequency = 1000 * 60 * 30; // 30 minutes
+export const refreshFrequency = 1000 * 60 * 60; // 1 hour
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const TROUBLE_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";
@@ -227,7 +227,9 @@ export const updateState = (event, prev) => {
       return {
         ...prev,
         removed: rollback,
-        storeError: String(event.error || "Could not remove item from trouble store."),
+        storeError: String(
+          event.error || "Could not remove item from trouble store.",
+        ),
       };
     }
 
@@ -256,7 +258,10 @@ export const updateState = (event, prev) => {
   return prev;
 };
 
-export const render = ({ output, error, storeError, expanded, removed }, dispatch) => {
+export const render = (
+  { output, error, storeError, expanded, removed },
+  dispatch,
+) => {
   if (error) {
     return (
       <div className="card">
@@ -275,7 +280,7 @@ export const render = ({ output, error, storeError, expanded, removed }, dispatc
   if (!data || data.error) {
     return (
       <div className="card">
-        <div className="title">Trouble Questions</div>
+        <div className="title">Review Questions</div>
         <div className="error">{data?.error || "No data yet."}</div>
         {data?.raw ? <pre className="raw">{data.raw}</pre> : null}
       </div>
@@ -283,23 +288,26 @@ export const render = ({ output, error, storeError, expanded, removed }, dispatc
   }
 
   const items = Array.isArray(data.items) ? data.items : [];
-  const visibleItems = items.filter((item) => item && item.id && !removed[item.id]);
+  const visibleItems = items.filter(
+    (item) => item && item.id && !removed[item.id],
+  );
 
   return (
     <div className="card">
       <div className="header">
-        <div className="title">Trouble Questions</div>
+        <div className="title">Review Questions</div>
       </div>
 
       {storeError ? <div className="warn">{storeError}</div> : null}
 
       {visibleItems.length === 0 ? (
-        <div className="empty">No trouble questions yet.</div>
+        <div className="empty">No review questions yet.</div>
       ) : (
         <div className="list">
           {visibleItems.map((item, i) => {
             const topic = typeof item.topic === "string" ? item.topic : "";
-            const question = typeof item.question === "string" ? item.question : "";
+            const question =
+              typeof item.question === "string" ? item.question : "";
             const answer = typeof item.answer === "string" ? item.answer : "";
             const rowKey = item.id || String(i);
             const isOpen = !!expanded[rowKey];
@@ -319,21 +327,34 @@ export const render = ({ output, error, storeError, expanded, removed }, dispatc
 
             return (
               <div key={rowKey} className="item">
-                <div className="qRow" onClick={() => dispatch({ type: "TOGGLE_ANSWER", idx: rowKey })}>
+                <div
+                  className="qRow"
+                  onClick={() =>
+                    dispatch({ type: "TOGGLE_ANSWER", idx: rowKey })
+                  }
+                >
                   <span className="cb" onClick={onRemove}>
                     ✓
                   </span>
                   <div className="qBlock">
                     <div className="topic">{topic || "Unknown topic"}</div>
-                    <div className="qText">{question || "(No question text)"}</div>
+                    <div className="qText">
+                      {question || "(No question text)"}
+                    </div>
                   </div>
-                  <button className="chatgptBtn" onClick={onChatGPT} title="Ask ChatGPT">
+                  <button
+                    className="chatgptBtn"
+                    onClick={onChatGPT}
+                    title="Ask ChatGPT"
+                  >
                     💬
                   </button>
                   <span className="chev">{isOpen ? "▾" : "▸"}</span>
                 </div>
 
-                {isOpen && answer ? <div className="answer">{answer}</div> : null}
+                {isOpen && answer ? (
+                  <div className="answer">{answer}</div>
+                ) : null}
               </div>
             );
           })}
@@ -345,8 +366,8 @@ export const render = ({ output, error, storeError, expanded, removed }, dispatc
 
 export const className = `
   left: 24px;
-  /* Adjust this value if the first widget's rendered height changes. */
-  top: 420px;
+  /* This widget is intentionally above the main QA widget. */
+  bottom: 24px;
   width: 560px;
 
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
