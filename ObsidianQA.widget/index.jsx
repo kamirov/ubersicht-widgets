@@ -189,13 +189,29 @@ export const render = ({ output, error, expanded, checked }, dispatch) => {
     run(`open "${obsidianUrl}"`);
   };
 
+  const onTopicChatGPT = (e) => {
+    e.stopPropagation();
+    const prompt = `Tell me about ${title}. I'm studying for USMLE Step 1, so keep things relevant`;
+    const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
+    run(`open "${url}"`);
+  };
+
   return (
     <div className="card">
       <div className="header">
         <div className="title">{title}</div>
-        <button className="openBtn" onClick={onOpen}>
-          Open
-        </button>
+        <div className="headerBtns">
+          <button className="openBtn" onClick={onOpen}>
+            Open
+          </button>
+          <button
+            className="topicChatgptBtn"
+            onClick={onTopicChatGPT}
+            title="Ask ChatGPT about topic"
+          >
+            💬
+          </button>
+        </div>
       </div>
 
       <div className="list">
@@ -277,6 +293,12 @@ export const className = `
     font-weight: 650;
   }
 
+  .headerBtns {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .openBtn {
     border: 1px solid rgba(255,255,255,0.18);
     background: rgba(255,255,255,0.10);
@@ -287,6 +309,21 @@ export const className = `
   }
 
   .openBtn:hover {
+    background: rgba(255,255,255,0.18);
+  }
+
+  .topicChatgptBtn {
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.10);
+    color: white;
+    border-radius: 10px;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-right:2px
+  }
+
+  .topicChatgptBtn:hover {
     background: rgba(255,255,255,0.18);
   }
 
