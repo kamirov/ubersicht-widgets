@@ -709,7 +709,9 @@ main();
             ok: false,
             cachedQuestionByMode: emptyCachedByMode(),
             warning: null,
-            error: String((data && data.error) || "Could not load pending question cache."),
+            error: String(
+              (data && data.error) || "Could not load pending question cache.",
+            ),
           });
           return;
         }
@@ -836,7 +838,10 @@ main();
           error:
             data && data.ok
               ? null
-              : String((data && data.error) || "Could not persist pending question cache."),
+              : String(
+                  (data && data.error) ||
+                    "Could not persist pending question cache.",
+                ),
         });
       } catch {
         dispatch({
@@ -992,10 +997,7 @@ const generateStepQuestion = async (
     });
 
     if (cachedEntry) {
-      persistPendingQuestionForMode(
-        { mode: safeMode, cachedEntry },
-        dispatch,
-      );
+      persistPendingQuestionForMode({ mode: safeMode, cachedEntry }, dispatch);
     }
   } catch (err) {
     const isTimeout =
@@ -1021,6 +1023,7 @@ const emptyQuestionByMode = () => ({ easy: null, hard: null });
 const emptyErrorByMode = () => ({ easy: null, hard: null });
 const emptySelectedByMode = () => ({ easy: "", hard: "" });
 const emptyRevealedByMode = () => ({ easy: false, hard: false });
+const emptyResultByMode = () => ({ easy: "", hard: "" });
 const emptyLoadingByMode = () => ({ easy: false, hard: false });
 const emptyGenerationIdByMode = () => ({ easy: 0, hard: 0 });
 
@@ -1043,6 +1046,7 @@ const scheduleGenerationForContexts = (baseState, payload) => {
       questionByMode: emptyQuestionByMode(),
       selectedKeyByMode: emptySelectedByMode(),
       revealedByMode: emptyRevealedByMode(),
+      resultByMode: emptyResultByMode(),
       pendingGenerationByMode: emptyPendingByMode(),
       latestGenerationIdByMode: emptyGenerationIdByMode(),
     };
@@ -1072,6 +1076,7 @@ const scheduleGenerationForContexts = (baseState, payload) => {
   const nextErrorByMode = emptyErrorByMode();
   const nextSelectedByMode = emptySelectedByMode();
   const nextRevealedByMode = emptyRevealedByMode();
+  const nextResultByMode = emptyResultByMode();
   const nextPendingByMode = emptyPendingByMode();
   const nextGenerationIdByMode = {
     ...baseState.latestGenerationIdByMode,
@@ -1087,7 +1092,8 @@ const scheduleGenerationForContexts = (baseState, payload) => {
         : null;
 
     if (cachedEntry) {
-      nextTopicContextByMode[mode] = cachedEntry.topicContext || context || null;
+      nextTopicContextByMode[mode] =
+        cachedEntry.topicContext || context || null;
       nextQuestionByMode[mode] = cachedEntry.question || null;
       nextLoadingByMode[mode] = false;
       nextErrorByMode[mode] = null;
@@ -1120,6 +1126,7 @@ const scheduleGenerationForContexts = (baseState, payload) => {
     questionByMode: nextQuestionByMode,
     selectedKeyByMode: nextSelectedByMode,
     revealedByMode: nextRevealedByMode,
+    resultByMode: nextResultByMode,
     pendingGenerationByMode: nextPendingByMode,
     latestGenerationIdByMode: nextGenerationIdByMode,
     generationCounter: nextGenerationCounter,
@@ -1147,6 +1154,7 @@ export const initialState = {
   questionByMode: emptyQuestionByMode(),
   selectedKeyByMode: emptySelectedByMode(),
   revealedByMode: emptyRevealedByMode(),
+  resultByMode: emptyResultByMode(),
   topicContextByMode: emptyContextByMode(),
   pendingGenerationByMode: emptyPendingByMode(),
   latestGenerationIdByMode: emptyGenerationIdByMode(),
@@ -1318,6 +1326,10 @@ export const updateState = (event, prev) => {
           ...prev.revealedByMode,
           [mode]: false,
         },
+        resultByMode: {
+          ...prev.resultByMode,
+          [mode]: "",
+        },
       };
     }
 
@@ -1350,6 +1362,10 @@ export const updateState = (event, prev) => {
         ...prev.revealedByMode,
         [mode]: false,
       },
+      resultByMode: {
+        ...prev.resultByMode,
+        [mode]: "",
+      },
     };
   }
 
@@ -1360,6 +1376,25 @@ export const updateState = (event, prev) => {
 
     const key = normalizeChoiceKey(event.key);
     if (!key) return prev;
+
+    const question =
+      prev.questionByMode && prev.questionByMode[mode]
+        ? prev.questionByMode[mode]
+        : null;
+    const isCorrect =
+      question &&
+      typeof question === "object" &&
+      normalizeChoiceKey(question.correctKey) === key;
+    const hasValidCorrectKey =
+      !!question &&
+      typeof question === "object" &&
+      !!normalizeChoiceKey(question.correctKey);
+    const nextResult = hasValidCorrectKey
+      ? isCorrect
+        ? "correct"
+        : "incorrect"
+      : "";
+
     return {
       ...prev,
       selectedKeyByMode: {
@@ -1373,6 +1408,10 @@ export const updateState = (event, prev) => {
       cachedQuestionByMode: {
         ...prev.cachedQuestionByMode,
         [mode]: null,
+      },
+      resultByMode: {
+        ...prev.resultByMode,
+        [mode]: nextResult,
       },
     };
   }
@@ -1408,6 +1447,7 @@ export const updateState = (event, prev) => {
         questionByMode: emptyQuestionByMode(),
         selectedKeyByMode: emptySelectedByMode(),
         revealedByMode: emptyRevealedByMode(),
+        resultByMode: emptyResultByMode(),
         topicContextByMode: emptyContextByMode(),
         pendingGenerationByMode: emptyPendingByMode(),
         latestGenerationIdByMode: emptyGenerationIdByMode(),
@@ -1440,6 +1480,7 @@ export const render = (
     questionByMode,
     selectedKeyByMode,
     revealedByMode,
+    resultByMode,
     topicContextByMode,
     pendingGenerationByMode,
     pendingCommandRefreshNonce,
@@ -1604,20 +1645,32 @@ export const render = (
     run(`open '${escapeForSingleQuotedShell(url)}'`);
   };
 
+  const getModeButtonClassName = (modeKey) => {
+    const classes = ["modeBtn"];
+    if (mode === modeKey) classes.push("modeBtnActive");
+    const modeResult =
+      resultByMode && typeof resultByMode[modeKey] === "string"
+        ? resultByMode[modeKey]
+        : "";
+    if (modeResult === "correct") classes.push("modeBtnCorrect");
+    if (modeResult === "incorrect") classes.push("modeBtnWrong");
+    return classes.join(" ");
+  };
+
   return (
     <div className="card">
       <div className="header">
         <div className="title">USMLE Practice Question</div>
         <div className="headerBtns">
           <button
-            className={`modeBtn ${mode === "easy" ? "modeBtnActive" : ""}`}
+            className={getModeButtonClassName("easy")}
             onClick={() => dispatch({ type: "MODE_SELECTED", mode: "easy" })}
             title="Easy mode"
           >
             {DIFFICULTY_PROFILES.easy.emoji}
           </button>
           <button
-            className={`modeBtn ${mode === "hard" ? "modeBtnActive" : ""}`}
+            className={getModeButtonClassName("hard")}
             onClick={() => dispatch({ type: "MODE_SELECTED", mode: "hard" })}
             title="Hard mode"
           >
@@ -1795,6 +1848,30 @@ export const className = `
     background: rgba(255,255,255,0.26);
   }
 
+  .modeBtnCorrect,
+  .modeBtnCorrect:hover,
+  .modeBtnCorrect:focus-visible {
+    background: rgba(55, 130, 70, 0.28);
+    border-color: rgba(110, 210, 130, 0.42);
+  }
+
+  .modeBtnWrong,
+  .modeBtnWrong:hover,
+  .modeBtnWrong:focus-visible {
+    background: rgba(145, 65, 65, 0.26);
+    border-color: rgba(220, 120, 120, 0.36);
+  }
+
+  .modeBtnActive.modeBtnCorrect {
+    background: rgba(65, 150, 80, 0.38);
+    border-color: rgba(125, 220, 145, 0.52);
+  }
+
+  .modeBtnActive.modeBtnWrong {
+    background: rgba(165, 72, 72, 0.36);
+    border-color: rgba(235, 135, 135, 0.48);
+  }
+
   .loading {
     margin: 8px 0 4px;
     font-size: 14px;
@@ -1894,7 +1971,7 @@ export const className = `
   }
 
   .choiceExplanation {
-    padding: 0 12px 10px 34px;
+    padding: 12px 12px 10px 34px;
     font-size: 13px;
     line-height: 1.35;
     opacity: 0.92;
