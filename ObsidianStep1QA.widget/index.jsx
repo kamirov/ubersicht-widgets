@@ -559,6 +559,7 @@ export const initialState = {
   output: "",
   error: null,
 
+  needsApiKeyLoad: true,
   apiKeyLoaded: false,
   apiKeyLoading: false,
   apiKey: "",
@@ -575,9 +576,69 @@ export const initialState = {
 
   generationId: 0,
   lastGeneratedTopicKey: "",
+  pendingGenerationTopicKey: null,
+  pendingGenerationId: null,
 };
 
 export const updateState = (event, prev) => {
+  const parseCommandPayload = (rawOutput) => {
+    try {
+      const parsed = JSON.parse((rawOutput || "").trim());
+      if (!parsed || typeof parsed !== "object" || parsed.error) return null;
+
+      const topic = typeof parsed.topic === "string" ? parsed.topic : "";
+      const file = typeof parsed.file === "string" ? parsed.file : "";
+      const path = typeof parsed.path === "string" ? parsed.path : "";
+      const samplePairs = Array.isArray(parsed.samplePairs) ? parsed.samplePairs : [];
+      const hasShape =
+        !!topic &&
+        !!file &&
+        !!path &&
+        Number.isFinite(Number(parsed.questionsCount)) &&
+        Number.isFinite(Number(parsed.answersCount));
+
+      if (!hasShape) return null;
+      return { topic, path, samplePairs };
+    } catch {
+      return null;
+    }
+  };
+
+  const maybeScheduleGeneration = (baseState, parsedPayload) => {
+    const hasApiKey =
+      typeof baseState.apiKey === "string" && baseState.apiKey.trim().length > 0;
+    if (!hasApiKey || !parsedPayload) {
+      return {
+        ...baseState,
+        loadingQuestion: false,
+        pendingGenerationTopicKey: null,
+        pendingGenerationId: null,
+      };
+    }
+
+    const topicKey = `${parsedPayload.path}::${parsedPayload.topic}`;
+    if (baseState.lastGeneratedTopicKey === topicKey) {
+      return {
+        ...baseState,
+        pendingGenerationTopicKey: null,
+        pendingGenerationId: null,
+      };
+    }
+
+    const nextGenerationId = Number(baseState.generationId) + 1;
+    return {
+      ...baseState,
+      loadingQuestion: true,
+      questionError: null,
+      question: null,
+      selectedKey: "",
+      revealed: false,
+      generationId: nextGenerationId,
+      pendingGenerationTopicKey: topicKey,
+      pendingGenerationId: nextGenerationId,
+    };
+  };
+
   if (event && event.type === "TOGGLE_API_KEY_PANEL") {
     return { ...prev, apiKeyPanelOpen: !prev.apiKeyPanelOpen };
   }
@@ -593,6 +654,7 @@ export const updateState = (event, prev) => {
   if (event && event.type === "LOAD_API_KEY_START") {
     return {
       ...prev,
+      needsApiKeyLoad: false,
       apiKeyLoading: true,
       apiKeyStatus: null,
       apiKeyWarning: null,
@@ -603,6 +665,7 @@ export const updateState = (event, prev) => {
     const key = event.ok ? String(event.openaiApiKey || "") : "";
     return {
       ...prev,
+      needsApiKeyLoad: false,
       apiKeyLoaded: true,
       apiKeyLoading: false,
       apiKey: key,
@@ -628,7 +691,7 @@ export const updateState = (event, prev) => {
       };
     }
 
-    return {
+    const base = {
       ...prev,
       apiKey: String(event.openaiApiKey || ""),
       apiKeyInput: String(event.openaiApiKey || ""),
@@ -639,18 +702,24 @@ export const updateState = (event, prev) => {
       selectedKey: "",
       revealed: false,
       lastGeneratedTopicKey: "",
+      pendingGenerationTopicKey: null,
+      pendingGenerationId: null,
     };
+
+    return maybeScheduleGeneration(base, parseCommandPayload(prev.output));
   }
 
-  if (event && event.type === "GENERATE_START") {
+  if (event && event.type === "GENERATION_REQUEST_SENT") {
+    if (
+      Number(event.generationId) !== Number(prev.pendingGenerationId) ||
+      String(event.topicKey || "") !== String(prev.pendingGenerationTopicKey || "")
+    ) {
+      return prev;
+    }
     return {
       ...prev,
-      loadingQuestion: true,
-      questionError: null,
-      question: null,
-      selectedKey: "",
-      revealed: false,
-      generationId: Number(event.generationId) || prev.generationId + 1,
+      pendingGenerationTopicKey: null,
+      pendingGenerationId: null,
     };
   }
 
@@ -664,6 +733,8 @@ export const updateState = (event, prev) => {
         question: null,
         questionError: String(event.error || "Could not generate question."),
         lastGeneratedTopicKey: String(event.topicKey || ""),
+        pendingGenerationTopicKey: null,
+        pendingGenerationId: null,
       };
     }
 
@@ -675,6 +746,8 @@ export const updateState = (event, prev) => {
       selectedKey: "",
       revealed: false,
       lastGeneratedTopicKey: String(event.topicKey || ""),
+      pendingGenerationTopicKey: null,
+      pendingGenerationId: null,
     };
   }
 
@@ -694,7 +767,7 @@ export const updateState = (event, prev) => {
   }
 
   if (event && typeof event.output === "string") {
-    return {
+    const base = {
       ...prev,
       output: event.output,
       error: null,
@@ -704,7 +777,10 @@ export const updateState = (event, prev) => {
       selectedKey: "",
       revealed: false,
       lastGeneratedTopicKey: "",
+      pendingGenerationTopicKey: null,
+      pendingGenerationId: null,
     };
+    return maybeScheduleGeneration(base, parseCommandPayload(event.output));
   }
 
   return prev;
@@ -715,6 +791,7 @@ export const render = (
     output,
     error,
     apiKeyLoaded,
+    needsApiKeyLoad,
     apiKeyLoading,
     apiKey,
     apiKeyInput,
@@ -726,14 +803,17 @@ export const render = (
     question,
     selectedKey,
     revealed,
-    generationId,
     lastGeneratedTopicKey,
+    pendingGenerationTopicKey,
+    pendingGenerationId,
   },
   dispatch,
 ) => {
-  if (!apiKeyLoaded && !apiKeyLoading) {
-    dispatch({ type: "LOAD_API_KEY_START" });
-    loadApiKey(dispatch);
+  if (needsApiKeyLoad && !apiKeyLoaded && !apiKeyLoading) {
+    setTimeout(() => {
+      dispatch({ type: "LOAD_API_KEY_START" });
+      loadApiKey(dispatch);
+    }, 0);
   }
 
   if (error) {
@@ -780,29 +860,33 @@ export const render = (
     );
   }
 
-  const topicKey = `${path}::${topic}`;
   const hasApiKey = typeof apiKey === "string" && apiKey.trim().length > 0;
 
   if (
-    apiKeyLoaded &&
     hasApiKey &&
-    !loadingQuestion &&
-    lastGeneratedTopicKey !== topicKey
+    pendingGenerationTopicKey &&
+    pendingGenerationId !== null &&
+    pendingGenerationTopicKey !== lastGeneratedTopicKey
   ) {
-    const nextGenerationId = Number(generationId) + 1;
-    dispatch({ type: "GENERATE_START", generationId: nextGenerationId });
-    generateStepQuestion(
-      {
-        apiKey: apiKey.trim(),
-        topic,
-        file,
-        path,
-        samplePairs,
-        generationId: nextGenerationId,
-        topicKey,
-      },
-      dispatch,
-    );
+    setTimeout(() => {
+      dispatch({
+        type: "GENERATION_REQUEST_SENT",
+        topicKey: pendingGenerationTopicKey,
+        generationId: pendingGenerationId,
+      });
+      generateStepQuestion(
+        {
+          apiKey: apiKey.trim(),
+          topic,
+          file,
+          path,
+          samplePairs,
+          generationId: pendingGenerationId,
+          topicKey: pendingGenerationTopicKey,
+        },
+        dispatch,
+      );
+    }, 0);
   }
 
   const onTopicChatGPT = (e) => {
