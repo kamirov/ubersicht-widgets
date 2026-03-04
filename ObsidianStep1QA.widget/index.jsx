@@ -9,6 +9,8 @@ const SETTINGS_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/openai-settings.json";
 const PENDING_QUESTIONS_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianStep1QA.widget/pending-questions.json";
+const WRONG_TOPIC_COUNTS_STORE =
+  "/Users/kamirov/Projects/ubersicht-widgets/ObsidianStep1QA.widget/wrong-topic-counts.json";
 
 export const command = `
 "${NODE}" <<'EOF'
@@ -151,11 +153,19 @@ EOF
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
 
-const QUESTION_MODES = ["easy", "hard"];
+const QUESTION_MODES = ["targeted", "easy", "hard"];
 const CHOICE_KEYS = ["A", "B", "C", "D", "E"];
 const DEFAULT_MODE = "easy";
 
 const DIFFICULTY_PROFILES = {
+  targeted: {
+    label: "targeted",
+    title: "Targeted",
+    emoji: "🎯",
+    promptMode: "hard",
+    difficultyInstruction:
+      "Target harder board-style difficulty: require multi-step integration, subtler distractors, and less obvious cueing.",
+  },
   easy: {
     label: "easy",
     title: "Easy",
@@ -175,7 +185,8 @@ const DIFFICULTY_PROFILES = {
 const scheduledGenerationRequests = new Set();
 const scheduledRefreshRequests = new Set();
 const scheduledCacheMutationRequests = new Set();
-const OPENAI_TIMEOUT_MS = 25000;
+const scheduledWrongTopicMutationRequests = new Set();
+const OPENAI_TIMEOUT_MS = 60000;
 
 const normalizeModeKey = (mode) => {
   const value = String(mode || "")
@@ -189,6 +200,59 @@ const normalizeChoiceKey = (key) => {
     .trim()
     .toUpperCase();
   return CHOICE_KEYS.includes(upper) ? upper : "";
+};
+
+const normalizeWrongTopicKey = (topic) => {
+  const normalized = typeof topic === "string" ? topic.trim() : "";
+  return normalized || "Unknown topic";
+};
+
+const normalizeWrongTopicCounts = (input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const out = {};
+  for (const [rawTopic, rawCount] of Object.entries(input)) {
+    const topic = normalizeWrongTopicKey(rawTopic);
+    const count = Number(rawCount);
+    if (!Number.isFinite(count) || count < 0) continue;
+    const normalizedCount = Math.floor(count);
+    if (normalizedCount <= 0) continue;
+    out[topic] = (out[topic] || 0) + normalizedCount;
+  }
+  return out;
+};
+
+const pickWeightedTopic = (counts) => {
+  const normalized = normalizeWrongTopicCounts(counts);
+  const entries = Object.entries(normalized).filter(
+    ([topic, count]) => !!topic && Number.isFinite(count) && count > 0,
+  );
+  if (!entries.length) return "";
+
+  let total = 0;
+  for (const [, count] of entries) total += count;
+  if (!Number.isFinite(total) || total <= 0) return "";
+
+  let roll = Math.random() * total;
+  for (const [topic, count] of entries) {
+    roll -= count;
+    if (roll < 0) return topic;
+  }
+  return entries[entries.length - 1][0] || "";
+};
+
+const makeTargetedContextFromTopic = (topic, count) => {
+  const safeTopic = normalizeWrongTopicKey(topic);
+  const safeCount = Number.isFinite(Number(count))
+    ? Math.max(1, Math.floor(Number(count)))
+    : 1;
+  return {
+    topic: safeTopic,
+    file: "wrong-topic-counts.json",
+    path: WRONG_TOPIC_COUNTS_STORE,
+    questionsCount: safeCount,
+    answersCount: safeCount,
+    samplePairs: [],
+  };
 };
 
 const normalizeQuestion = (input) => {
@@ -318,7 +382,7 @@ const parseCommandPayload = (rawOutput) => {
   if (!parsed || typeof parsed !== "object" || parsed.error) return null;
   if (!Array.isArray(parsed.contexts)) return null;
 
-  const contexts = { easy: null, hard: null };
+  const contexts = { targeted: null, easy: null, hard: null };
   for (const entry of parsed.contexts) {
     const context = parseModeContext(entry);
     if (!context) return null;
@@ -388,6 +452,9 @@ const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
     difficultyProfile && typeof difficultyProfile === "object"
       ? difficultyProfile
       : DIFFICULTY_PROFILES[safeMode];
+  const promptMode = normalizeModeKey(profile && profile.promptMode)
+    ? normalizeModeKey(profile.promptMode)
+    : safeMode;
   const contextData =
     topicContext && typeof topicContext === "object" ? topicContext : {};
   const cleanedPairs = Array.isArray(contextData.samplePairs)
@@ -406,7 +473,7 @@ const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
     "You create rigorous USMLE Step 1 single-best-answer questions. Return only valid JSON.";
 
   const userMessage = [
-    `Difficulty mode: ${safeMode.toUpperCase()}`,
+    `Difficulty mode: ${promptMode.toUpperCase()}`,
     `Topic: ${contextData.topic}`,
     // `Source file: ${contextData.file || "Unknown file"}`,
     // `Source path: ${contextData.path || "Unknown path"}`,
@@ -496,7 +563,7 @@ const extractResponseText = (data) => {
   return fragments.join("\n").trim();
 };
 
-const emptyCachedByMode = () => ({ easy: null, hard: null });
+const emptyCachedByMode = () => ({ targeted: null, easy: null, hard: null });
 
 const parsePendingQuestionsStore = (rawOutput) => {
   let parsed;
@@ -676,7 +743,10 @@ function main() {
     console.log(JSON.stringify({
       ok: true,
       exists: false,
-      raw: JSON.stringify({ version: 1, questions: { easy: null, hard: null } }),
+      raw: JSON.stringify({
+        version: 1,
+        questions: { targeted: null, easy: null, hard: null },
+      }),
       warning: null,
     }));
     return;
@@ -772,7 +842,7 @@ const ENTRY = ${JSON.stringify(payload)};
 
 function readCurrentStore() {
   if (!fs.existsSync(STORE)) {
-    return { version: 1, questions: { easy: null, hard: null } };
+    return { version: 1, questions: { targeted: null, easy: null, hard: null } };
   }
 
   try {
@@ -788,6 +858,10 @@ function readCurrentStore() {
       return {
         version: 1,
         questions: {
+          targeted:
+            typeof parsed.questions.targeted === "undefined"
+              ? null
+              : parsed.questions.targeted,
           easy:
             typeof parsed.questions.easy === "undefined"
               ? null
@@ -800,10 +874,10 @@ function readCurrentStore() {
       };
     }
   } catch {
-    return { version: 1, questions: { easy: null, hard: null } };
+    return { version: 1, questions: { targeted: null, easy: null, hard: null } };
   }
 
-  return { version: 1, questions: { easy: null, hard: null } };
+  return { version: 1, questions: { targeted: null, easy: null, hard: null } };
 }
 
 function main() {
@@ -858,6 +932,214 @@ main();
         mode: safeMode,
         ok: false,
         error: `Pending question cache persist failed: ${String(err && err.message ? err.message : err)}`,
+      });
+    });
+};
+
+const loadWrongTopicCounts = (dispatch) => {
+  const nodeScript = `
+const fs = require("fs");
+
+const STORE = '${escapeForSingleQuotedShell(WRONG_TOPIC_COUNTS_STORE)}';
+
+function main() {
+  if (!fs.existsSync(STORE)) {
+    console.log(JSON.stringify({
+      ok: true,
+      counts: {},
+      warning: null,
+    }));
+    return;
+  }
+
+  let raw;
+  try {
+    raw = fs.readFileSync(STORE, "utf8");
+  } catch (err) {
+    console.log(JSON.stringify({
+      ok: false,
+      error: "Could not read wrong topic counts: " + String(err && err.message ? err.message : err),
+    }));
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.log(JSON.stringify({
+      ok: true,
+      counts: {},
+      warning: "Wrong topic counts are malformed JSON. Using empty map.",
+    }));
+    return;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    console.log(JSON.stringify({
+      ok: true,
+      counts: {},
+      warning: "Wrong topic counts schema is invalid. Using empty map.",
+    }));
+    return;
+  }
+
+  console.log(JSON.stringify({
+    ok: true,
+    counts: parsed,
+    warning: null,
+  }));
+}
+
+main();
+`;
+
+  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
+    .then((result) => {
+      try {
+        const data = JSON.parse(String(result || "").trim());
+        dispatch({
+          type: "LOAD_WRONG_TOPICS_RESULT",
+          ok: !!(data && data.ok),
+          counts:
+            data && data.counts && typeof data.counts === "object"
+              ? data.counts
+              : {},
+          warning:
+            data && typeof data.warning === "string" ? data.warning : null,
+          error:
+            data && data.ok
+              ? null
+              : String(
+                  (data && data.error) || "Could not load wrong topic counts.",
+                ),
+        });
+      } catch {
+        dispatch({
+          type: "LOAD_WRONG_TOPICS_RESULT",
+          ok: false,
+          counts: {},
+          warning: null,
+          error: "Could not parse wrong topic count load response.",
+        });
+      }
+    })
+    .catch((err) => {
+      dispatch({
+        type: "LOAD_WRONG_TOPICS_RESULT",
+        ok: false,
+        counts: {},
+        warning: null,
+        error: `Wrong topic count load failed: ${String(err && err.message ? err.message : err)}`,
+      });
+    });
+};
+
+const mutateWrongTopicCount = ({ topic, delta, deleteAtZero }, dispatch) => {
+  const normalizedTopic = normalizeWrongTopicKey(topic);
+  const safeDelta = Number.isFinite(Number(delta))
+    ? Math.floor(Number(delta))
+    : 0;
+  if (!safeDelta) return;
+
+  const nodeScript = `
+const fs = require("fs");
+const path = require("path");
+
+const STORE = '${escapeForSingleQuotedShell(WRONG_TOPIC_COUNTS_STORE)}';
+const TOPIC = ${JSON.stringify(normalizedTopic)};
+const DELTA = ${JSON.stringify(safeDelta)};
+const DELETE_AT_ZERO = ${JSON.stringify(!!deleteAtZero)};
+
+function toMap(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function toNonNegativeNumber(value) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
+}
+
+function main() {
+  let map = {};
+
+  if (fs.existsSync(STORE)) {
+    try {
+      const raw = fs.readFileSync(STORE, "utf8");
+      map = toMap(raw);
+    } catch {
+      map = {};
+    }
+  }
+
+  const current = toNonNegativeNumber(map[TOPIC]);
+  const nextValue = Math.max(0, current + DELTA);
+  if (DELETE_AT_ZERO && nextValue === 0) {
+    delete map[TOPIC];
+  } else {
+    map[TOPIC] = nextValue;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(STORE), { recursive: true });
+    fs.writeFileSync(STORE, JSON.stringify(map, null, 2), "utf8");
+  } catch (err) {
+    console.log(JSON.stringify({
+      ok: false,
+      error: "Could not write wrong topic counts: " + String(err && err.message ? err.message : err),
+    }));
+    return;
+  }
+
+  console.log(JSON.stringify({ ok: true, counts: map }));
+}
+
+main();
+`;
+
+  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
+    .then((result) => {
+      try {
+        const data = JSON.parse(String(result || "").trim());
+        dispatch({
+          type: "MUTATE_WRONG_TOPIC_RESULT",
+          ok: !!(data && data.ok),
+          counts:
+            data && data.counts && typeof data.counts === "object"
+              ? data.counts
+              : null,
+          error:
+            data && data.ok
+              ? null
+              : String(
+                  (data && data.error) ||
+                    "Could not mutate wrong topic counts.",
+                ),
+        });
+      } catch {
+        dispatch({
+          type: "MUTATE_WRONG_TOPIC_RESULT",
+          ok: false,
+          counts: null,
+          error: "Could not parse wrong topic count mutation response.",
+        });
+      }
+    })
+    .catch((err) => {
+      dispatch({
+        type: "MUTATE_WRONG_TOPIC_RESULT",
+        ok: false,
+        counts: null,
+        error: `Wrong topic count mutation failed: ${String(err && err.message ? err.message : err)}`,
       });
     });
 };
@@ -1017,15 +1299,23 @@ const generateStepQuestion = async (
   }
 };
 
-const emptyPendingByMode = () => ({ easy: null, hard: null });
-const emptyContextByMode = () => ({ easy: null, hard: null });
-const emptyQuestionByMode = () => ({ easy: null, hard: null });
-const emptyErrorByMode = () => ({ easy: null, hard: null });
-const emptySelectedByMode = () => ({ easy: "", hard: "" });
-const emptyRevealedByMode = () => ({ easy: false, hard: false });
-const emptyResultByMode = () => ({ easy: "", hard: "" });
-const emptyLoadingByMode = () => ({ easy: false, hard: false });
-const emptyGenerationIdByMode = () => ({ easy: 0, hard: 0 });
+const emptyPendingByMode = () => ({ targeted: null, easy: null, hard: null });
+const emptyContextByMode = () => ({ targeted: null, easy: null, hard: null });
+const emptyQuestionByMode = () => ({ targeted: null, easy: null, hard: null });
+const emptyErrorByMode = () => ({ targeted: null, easy: null, hard: null });
+const emptySelectedByMode = () => ({ targeted: "", easy: "", hard: "" });
+const emptyRevealedByMode = () => ({
+  targeted: false,
+  easy: false,
+  hard: false,
+});
+const emptyResultByMode = () => ({ targeted: "", easy: "", hard: "" });
+const emptyLoadingByMode = () => ({
+  targeted: false,
+  easy: false,
+  hard: false,
+});
+const emptyGenerationIdByMode = () => ({ targeted: 0, easy: 0, hard: 0 });
 
 const makeTopicKey = (mode, context) => {
   const safeMode = normalizeModeKey(mode);
@@ -1036,8 +1326,8 @@ const makeTopicKey = (mode, context) => {
 };
 
 const scheduleGenerationForContexts = (baseState, payload) => {
-  const contexts = payload && payload.contexts ? payload.contexts : null;
-  if (!contexts || !contexts.easy || !contexts.hard) {
+  const payloadContexts = payload && payload.contexts ? payload.contexts : null;
+  if (!payloadContexts || !payloadContexts.easy || !payloadContexts.hard) {
     return {
       ...baseState,
       topicContextByMode: emptyContextByMode(),
@@ -1053,19 +1343,37 @@ const scheduleGenerationForContexts = (baseState, payload) => {
   }
 
   const cacheLoaded = !!baseState.cacheLoaded;
-  if (!cacheLoaded) {
+  const wrongTopicLoaded = !!baseState.wrongTopicLoaded;
+  if (!cacheLoaded || !wrongTopicLoaded) {
     return {
       ...baseState,
       activeMode: DEFAULT_MODE,
       topicContextByMode: {
-        easy: contexts.easy,
-        hard: contexts.hard,
+        targeted: null,
+        easy: payloadContexts.easy,
+        hard: payloadContexts.hard,
       },
       loadingByMode: emptyLoadingByMode(),
       errorByMode: emptyErrorByMode(),
       pendingGenerationByMode: emptyPendingByMode(),
     };
   }
+
+  const wrongTopicCounts = normalizeWrongTopicCounts(
+    baseState.wrongTopicCounts,
+  );
+  const pickedTargetedTopic = pickWeightedTopic(wrongTopicCounts);
+  const targetedContext = pickedTargetedTopic
+    ? makeTargetedContextFromTopic(
+        pickedTargetedTopic,
+        wrongTopicCounts[pickedTargetedTopic],
+      )
+    : null;
+  const contexts = {
+    targeted: targetedContext,
+    easy: payloadContexts.easy,
+    hard: payloadContexts.hard,
+  };
 
   const hasApiKey =
     typeof baseState.apiKey === "string" && baseState.apiKey.trim().length > 0;
@@ -1114,6 +1422,10 @@ const scheduleGenerationForContexts = (baseState, payload) => {
       nextGenerationIdByMode[mode] = nextGenerationId;
     } else {
       nextLoadingByMode[mode] = false;
+      if (mode === "targeted" && !context) {
+        nextErrorByMode[mode] =
+          "No targeted topics available yet. Miss a question first.";
+      }
     }
   }
 
@@ -1147,6 +1459,11 @@ export const initialState = {
   cacheLoading: false,
   cacheWarning: null,
   cachedQuestionByMode: emptyCachedByMode(),
+  needsWrongTopicLoad: true,
+  wrongTopicLoaded: false,
+  wrongTopicLoading: false,
+  wrongTopicWarning: null,
+  wrongTopicCounts: {},
 
   activeMode: DEFAULT_MODE,
   loadingByMode: emptyLoadingByMode(),
@@ -1165,6 +1482,40 @@ export const initialState = {
 };
 
 export const updateState = (event, prev) => {
+  if (event && event.type === "LOAD_WRONG_TOPICS_START") {
+    return {
+      ...prev,
+      needsWrongTopicLoad: false,
+      wrongTopicLoading: true,
+      wrongTopicWarning: null,
+    };
+  }
+
+  if (event && event.type === "LOAD_WRONG_TOPICS_RESULT") {
+    const next = {
+      ...prev,
+      needsWrongTopicLoad: false,
+      wrongTopicLoaded: true,
+      wrongTopicLoading: false,
+      wrongTopicWarning: event.ok ? event.warning || null : event.error || null,
+      wrongTopicCounts:
+        event.ok && event.counts && typeof event.counts === "object"
+          ? normalizeWrongTopicCounts(event.counts)
+          : {},
+    };
+
+    if (next.pendingCommandRefreshNonce !== null) {
+      return next;
+    }
+
+    const parsedPayload = parseCommandPayload(next.output);
+    if (parsedPayload) {
+      return scheduleGenerationForContexts(next, parsedPayload);
+    }
+
+    return next;
+  }
+
   if (event && event.type === "LOAD_CACHE_START") {
     return {
       ...prev,
@@ -1186,6 +1537,7 @@ export const updateState = (event, prev) => {
         event.cachedQuestionByMode &&
         typeof event.cachedQuestionByMode === "object"
           ? {
+              targeted: event.cachedQuestionByMode.targeted || null,
               easy: event.cachedQuestionByMode.easy || null,
               hard: event.cachedQuestionByMode.hard || null,
             }
@@ -1248,6 +1600,10 @@ export const updateState = (event, prev) => {
       activeMode: DEFAULT_MODE,
       refreshNonce: nextNonce,
       pendingCommandRefreshNonce: nextNonce,
+      needsWrongTopicLoad: true,
+      wrongTopicLoaded: false,
+      wrongTopicLoading: false,
+      wrongTopicWarning: null,
       error: null,
     };
   }
@@ -1426,6 +1782,24 @@ export const updateState = (event, prev) => {
     };
   }
 
+  if (event && event.type === "MUTATE_WRONG_TOPIC_RESULT") {
+    if (event.ok) {
+      return {
+        ...prev,
+        wrongTopicCounts:
+          event.counts && typeof event.counts === "object"
+            ? normalizeWrongTopicCounts(event.counts)
+            : prev.wrongTopicCounts,
+      };
+    }
+    return {
+      ...prev,
+      cacheWarning:
+        String(event.error || "").trim() ||
+        "Could not mutate wrong topic counts.",
+    };
+  }
+
   if (event && event.error) {
     return { ...prev, error: String(event.error) };
   }
@@ -1469,6 +1843,10 @@ export const render = (
     cacheLoading,
     cacheWarning,
     cachedQuestionByMode,
+    wrongTopicLoaded,
+    needsWrongTopicLoad,
+    wrongTopicLoading,
+    wrongTopicWarning,
     apiKeyLoaded,
     needsApiKeyLoad,
     apiKeyLoading,
@@ -1498,6 +1876,13 @@ export const render = (
     setTimeout(() => {
       dispatch({ type: "LOAD_CACHE_START" });
       loadPendingQuestionsCache(dispatch);
+    }, 0);
+  }
+
+  if (needsWrongTopicLoad && !wrongTopicLoaded && !wrongTopicLoading) {
+    setTimeout(() => {
+      dispatch({ type: "LOAD_WRONG_TOPICS_START" });
+      loadWrongTopicCounts(dispatch);
     }, 0);
   }
 
@@ -1571,7 +1956,7 @@ export const render = (
   if (hasApiKey) {
     for (const modeKey of QUESTION_MODES) {
       const pending = pendingGenerationByMode[modeKey];
-      const context = topicContextByMode[modeKey] || contexts[modeKey];
+      const context = topicContextByMode[modeKey];
       if (!pending || !context) continue;
 
       const requestKey = `${modeKey}::${pending.generationId}::${pending.topicKey}`;
@@ -1634,6 +2019,62 @@ export const render = (
     }, 0);
   };
 
+  const persistWrongTopicIncrement = ({ modeKey, topic, question }) => {
+    const safeMode = normalizeModeKey(modeKey);
+    if (!safeMode) return;
+    const safeTopic = normalizeWrongTopicKey(topic);
+    const questionObject =
+      question && typeof question === "object" ? question : {};
+    const dedupeQuestionKey =
+      (typeof questionObject.stem === "string"
+        ? questionObject.stem.trim()
+        : "") ||
+      normalizeChoiceKey(questionObject.correctKey) ||
+      "unknown-question";
+    const requestKey = `${safeMode}::${safeTopic}::${dedupeQuestionKey}`;
+    if (scheduledWrongTopicMutationRequests.has(requestKey)) return;
+    scheduledWrongTopicMutationRequests.add(requestKey);
+    setTimeout(() => {
+      scheduledWrongTopicMutationRequests.delete(requestKey);
+      mutateWrongTopicCount(
+        {
+          topic: safeTopic,
+          delta: 1,
+          deleteAtZero: false,
+        },
+        dispatch,
+      );
+    }, 0);
+  };
+
+  const persistTargetedCorrectDecrement = ({ modeKey, topic, question }) => {
+    const safeMode = normalizeModeKey(modeKey);
+    if (safeMode !== "targeted") return;
+    const safeTopic = normalizeWrongTopicKey(topic);
+    const questionObject =
+      question && typeof question === "object" ? question : {};
+    const dedupeQuestionKey =
+      (typeof questionObject.stem === "string"
+        ? questionObject.stem.trim()
+        : "") ||
+      normalizeChoiceKey(questionObject.correctKey) ||
+      "unknown-question";
+    const requestKey = `${safeMode}::decrement::${safeTopic}::${dedupeQuestionKey}`;
+    if (scheduledWrongTopicMutationRequests.has(requestKey)) return;
+    scheduledWrongTopicMutationRequests.add(requestKey);
+    setTimeout(() => {
+      scheduledWrongTopicMutationRequests.delete(requestKey);
+      mutateWrongTopicCount(
+        {
+          topic: safeTopic,
+          delta: -1,
+          deleteAtZero: true,
+        },
+        dispatch,
+      );
+    }, 0);
+  };
+
   const onTopicChatGPT = (e) => {
     e.stopPropagation();
     const topic =
@@ -1662,6 +2103,15 @@ export const render = (
       <div className="header">
         <div className="title">USMLE Practice Question</div>
         <div className="headerBtns">
+          <button
+            className={getModeButtonClassName("targeted")}
+            onClick={() =>
+              dispatch({ type: "MODE_SELECTED", mode: "targeted" })
+            }
+            title="Targeted mode"
+          >
+            {DIFFICULTY_PROFILES.targeted.emoji}
+          </button>
           <button
             className={getModeButtonClassName("easy")}
             onClick={() => dispatch({ type: "MODE_SELECTED", mode: "easy" })}
@@ -1696,6 +2146,9 @@ export const render = (
 
       {apiKeyWarning ? <div className="warn">{apiKeyWarning}</div> : null}
       {cacheWarning ? <div className="warn">{cacheWarning}</div> : null}
+      {wrongTopicWarning ? (
+        <div className="warn">{wrongTopicWarning}</div>
+      ) : null}
       {commandWarning ? <div className="warn">{commandWarning}</div> : null}
 
       {!hasApiKey ? (
@@ -1748,7 +2201,33 @@ export const render = (
                     className={`choiceBtn ${selectedResultClass}`}
                     onClick={() => {
                       const alreadyRevealed = !!revealed;
+                      const wasCorrect =
+                        !!activeQuestion &&
+                        typeof activeQuestion === "object" &&
+                        normalizeChoiceKey(activeQuestion.correctKey) === key;
+                      const topicForWrongCount =
+                        activeContext && typeof activeContext.topic === "string"
+                          ? activeContext.topic
+                          : "";
                       dispatch({ type: "SELECT_ANSWER", mode, key });
+                      if (!alreadyRevealed && !wasCorrect) {
+                        persistWrongTopicIncrement({
+                          modeKey: mode,
+                          topic: topicForWrongCount,
+                          question: activeQuestion,
+                        });
+                      }
+                      if (
+                        !alreadyRevealed &&
+                        wasCorrect &&
+                        mode === "targeted"
+                      ) {
+                        persistTargetedCorrectDecrement({
+                          modeKey: mode,
+                          topic: topicForWrongCount,
+                          question: activeQuestion,
+                        });
+                      }
                       if (!alreadyRevealed && cachedQuestionByMode[mode]) {
                         persistQuestionRemoval(mode);
                       }
