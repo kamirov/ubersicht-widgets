@@ -1,6 +1,6 @@
 import { run } from "uebersicht";
 
-export const refreshFrequency = 1000 * 60 * 60; // 1 hour
+export const refreshFrequency = 1000 * 60 * 30; // 30 minutes
 
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const NOTES_DIR =
