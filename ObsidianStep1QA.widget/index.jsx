@@ -394,24 +394,24 @@ const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
     ? contextData.samplePairs.slice(0, 3)
     : [];
 
-  const sourceContext = cleanedPairs
-    .map((pair, idx) => {
-      const q = pair && typeof pair.q === "string" ? pair.q.trim() : "";
-      const a = pair && typeof pair.a === "string" ? pair.a.trim() : "";
-      return `${idx + 1}. Q: ${q}\nA: ${a}`;
-    })
-    .join("\n\n");
+  // const sourceContext = cleanedPairs
+  //   .map((pair, idx) => {
+  //     const q = pair && typeof pair.q === "string" ? pair.q.trim() : "";
+  //     const a = pair && typeof pair.a === "string" ? pair.a.trim() : "";
+  //     return `${idx + 1}. Q: ${q}\nA: ${a}`;
+  //   })
+  //   .join("\n\n");
 
   const systemMessage =
     "You create rigorous USMLE Step 1 single-best-answer questions. Return only valid JSON.";
 
   const userMessage = [
     `Difficulty mode: ${safeMode.toUpperCase()}`,
-    `Topic: ${contextData.topic || "Unknown topic"}`,
-    `Source file: ${contextData.file || "Unknown file"}`,
-    `Source path: ${contextData.path || "Unknown path"}`,
-    "Use this source context to design one clinically relevant Step 1 question:",
-    sourceContext || "(No source Q/A snippets available)",
+    `Topic: ${contextData.topic}`,
+    // `Source file: ${contextData.file || "Unknown file"}`,
+    // `Source path: ${contextData.path || "Unknown path"}`,
+    // "Use this source context to design one clinically relevant Step 1 question:",
+    // sourceContext || "(No source Q/A snippets available)",
     "",
     "Return JSON with this exact shape:",
     "{",
@@ -911,7 +911,7 @@ const generateStepQuestion = async (
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-5.2",
+        model: "gpt-5-mini",
         input: [
           {
             role: "system",
