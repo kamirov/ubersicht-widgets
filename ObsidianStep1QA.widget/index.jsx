@@ -125,7 +125,9 @@ const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
 
 const normalizeChoiceKey = (key) => {
-  const upper = String(key || "").trim().toUpperCase();
+  const upper = String(key || "")
+    .trim()
+    .toUpperCase();
   return ["A", "B", "C", "D", "E"].includes(upper) ? upper : "";
 };
 
@@ -143,7 +145,8 @@ const normalizeQuestion = (input) => {
   const choicesRaw = Array.isArray(input.choices) ? input.choices : [];
 
   if (!stem) return { question: null, error: "Question stem is missing." };
-  if (!correctKey) return { question: null, error: "Correct answer key is invalid." };
+  if (!correctKey)
+    return { question: null, error: "Correct answer key is invalid." };
   if (!correctExplanation) {
     return { question: null, error: "Correct answer explanation is missing." };
   }
@@ -155,15 +158,18 @@ const normalizeQuestion = (input) => {
   const choices = [];
   for (const entry of choicesRaw) {
     const key = normalizeChoiceKey(entry && entry.key);
-    const text = typeof (entry && entry.text) === "string" ? entry.text.trim() : "";
+    const text =
+      typeof (entry && entry.text) === "string" ? entry.text.trim() : "";
     const explanation =
       typeof (entry && entry.explanation) === "string"
         ? entry.explanation.trim()
         : "";
 
     if (!key) return { question: null, error: "Choice key must be A-E." };
-    if (seen.has(key)) return { question: null, error: "Choice keys must be unique." };
-    if (!text) return { question: null, error: `Choice ${key} is missing text.` };
+    if (seen.has(key))
+      return { question: null, error: "Choice keys must be unique." };
+    if (!text)
+      return { question: null, error: `Choice ${key} is missing text.` };
     if (!explanation) {
       return { question: null, error: `Choice ${key} is missing explanation.` };
     }
@@ -339,71 +345,13 @@ main();
     });
 };
 
-const saveApiKey = (apiKey, dispatch) => {
-  const nodeScript = `
-const fs = require("fs");
-const path = require("path");
-
-const STORE = '${escapeForSingleQuotedShell(SETTINGS_STORE)}';
-const TMP = STORE + ".tmp";
-const VALUE = ${JSON.stringify(String(apiKey || ""))};
-
-function main() {
-  const dir = path.dirname(STORE);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    TMP,
-    JSON.stringify({ version: 1, openaiApiKey: VALUE }, null, 2) + "\\n",
-    "utf8"
-  );
-  fs.renameSync(TMP, STORE);
-  console.log(JSON.stringify({ ok: true }));
-}
-
-try {
-  main();
-} catch (err) {
-  console.log(JSON.stringify({ ok: false, error: String(err && err.message ? err.message : err) }));
-}
-`;
-
-  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
-    .then((result) => {
-      try {
-        const data = JSON.parse(String(result || "").trim());
-        dispatch({
-          type: "SAVE_API_KEY_RESULT",
-          ok: !!(data && data.ok),
-          openaiApiKey: String(apiKey || ""),
-          error:
-            data && data.ok
-              ? null
-              : String((data && data.error) || "Could not save API key."),
-        });
-      } catch {
-        dispatch({
-          type: "SAVE_API_KEY_RESULT",
-          ok: false,
-          openaiApiKey: "",
-          error: "Could not parse API key save response.",
-        });
-      }
-    })
-    .catch((err) => {
-      dispatch({
-        type: "SAVE_API_KEY_RESULT",
-        ok: false,
-        openaiApiKey: "",
-        error: `API key save failed: ${String(err && err.message ? err.message : err)}`,
-      });
-    });
-};
-
 const generateStepQuestion = async (
   { apiKey, topic, file, path, samplePairs, generationId, topicKey },
   dispatch,
 ) => {
-  const cleanedPairs = Array.isArray(samplePairs) ? samplePairs.slice(0, 3) : [];
+  const cleanedPairs = Array.isArray(samplePairs)
+    ? samplePairs.slice(0, 3)
+    : [];
   const context = cleanedPairs
     .map((pair, idx) => {
       const q = pair && typeof pair.q === "string" ? pair.q.trim() : "";
@@ -563,9 +511,6 @@ export const initialState = {
   apiKeyLoaded: false,
   apiKeyLoading: false,
   apiKey: "",
-  apiKeyInput: "",
-  apiKeyPanelOpen: false,
-  apiKeyStatus: null,
   apiKeyWarning: null,
 
   loadingQuestion: false,
@@ -578,6 +523,8 @@ export const initialState = {
   lastGeneratedTopicKey: "",
   pendingGenerationTopicKey: null,
   pendingGenerationId: null,
+  refreshNonce: 0,
+  pendingCommandRefreshNonce: null,
 };
 
 export const updateState = (event, prev) => {
@@ -589,7 +536,9 @@ export const updateState = (event, prev) => {
       const topic = typeof parsed.topic === "string" ? parsed.topic : "";
       const file = typeof parsed.file === "string" ? parsed.file : "";
       const path = typeof parsed.path === "string" ? parsed.path : "";
-      const samplePairs = Array.isArray(parsed.samplePairs) ? parsed.samplePairs : [];
+      const samplePairs = Array.isArray(parsed.samplePairs)
+        ? parsed.samplePairs
+        : [];
       const hasShape =
         !!topic &&
         !!file &&
@@ -606,7 +555,8 @@ export const updateState = (event, prev) => {
 
   const maybeScheduleGeneration = (baseState, parsedPayload) => {
     const hasApiKey =
-      typeof baseState.apiKey === "string" && baseState.apiKey.trim().length > 0;
+      typeof baseState.apiKey === "string" &&
+      baseState.apiKey.trim().length > 0;
     if (!hasApiKey || !parsedPayload) {
       return {
         ...baseState,
@@ -639,24 +589,11 @@ export const updateState = (event, prev) => {
     };
   };
 
-  if (event && event.type === "TOGGLE_API_KEY_PANEL") {
-    return { ...prev, apiKeyPanelOpen: !prev.apiKeyPanelOpen };
-  }
-
-  if (event && event.type === "API_KEY_INPUT") {
-    return {
-      ...prev,
-      apiKeyInput: String(event.value || ""),
-      apiKeyStatus: null,
-    };
-  }
-
   if (event && event.type === "LOAD_API_KEY_START") {
     return {
       ...prev,
       needsApiKeyLoad: false,
       apiKeyLoading: true,
-      apiKeyStatus: null,
       apiKeyWarning: null,
     };
   }
@@ -669,34 +606,18 @@ export const updateState = (event, prev) => {
       apiKeyLoaded: true,
       apiKeyLoading: false,
       apiKey: key,
-      apiKeyInput: key,
       apiKeyWarning: event.ok ? event.warning || null : event.error || null,
-      apiKeyStatus: event.ok ? null : event.error || "Could not load API key.",
     };
   }
 
-  if (event && event.type === "SAVE_API_KEY_START") {
+  if (event && event.type === "REFRESH_CLICKED") {
+    const nextNonce = Number(prev.refreshNonce) + 1;
     return {
       ...prev,
-      apiKeyStatus: "Saving API key...",
-      apiKeyWarning: null,
-    };
-  }
-
-  if (event && event.type === "SAVE_API_KEY_RESULT") {
-    if (!event.ok) {
-      return {
-        ...prev,
-        apiKeyStatus: String(event.error || "Could not save API key."),
-      };
-    }
-
-    const base = {
-      ...prev,
-      apiKey: String(event.openaiApiKey || ""),
-      apiKeyInput: String(event.openaiApiKey || ""),
-      apiKeyStatus: "API key saved.",
-      apiKeyWarning: null,
+      refreshNonce: nextNonce,
+      pendingCommandRefreshNonce: nextNonce,
+      error: null,
+      loadingQuestion: true,
       questionError: null,
       question: null,
       selectedKey: "",
@@ -705,14 +626,23 @@ export const updateState = (event, prev) => {
       pendingGenerationTopicKey: null,
       pendingGenerationId: null,
     };
+  }
 
-    return maybeScheduleGeneration(base, parseCommandPayload(prev.output));
+  if (event && event.type === "FORCE_COMMAND_REFRESH") {
+    if (Number(event.nonce) !== Number(prev.pendingCommandRefreshNonce)) {
+      return prev;
+    }
+    return {
+      ...prev,
+      pendingCommandRefreshNonce: null,
+    };
   }
 
   if (event && event.type === "GENERATION_REQUEST_SENT") {
     if (
       Number(event.generationId) !== Number(prev.pendingGenerationId) ||
-      String(event.topicKey || "") !== String(prev.pendingGenerationTopicKey || "")
+      String(event.topicKey || "") !==
+        String(prev.pendingGenerationTopicKey || "")
     ) {
       return prev;
     }
@@ -735,6 +665,7 @@ export const updateState = (event, prev) => {
         lastGeneratedTopicKey: String(event.topicKey || ""),
         pendingGenerationTopicKey: null,
         pendingGenerationId: null,
+        pendingCommandRefreshNonce: null,
       };
     }
 
@@ -748,6 +679,7 @@ export const updateState = (event, prev) => {
       lastGeneratedTopicKey: String(event.topicKey || ""),
       pendingGenerationTopicKey: null,
       pendingGenerationId: null,
+      pendingCommandRefreshNonce: null,
     };
   }
 
@@ -779,6 +711,7 @@ export const updateState = (event, prev) => {
       lastGeneratedTopicKey: "",
       pendingGenerationTopicKey: null,
       pendingGenerationId: null,
+      pendingCommandRefreshNonce: null,
     };
     return maybeScheduleGeneration(base, parseCommandPayload(event.output));
   }
@@ -794,9 +727,6 @@ export const render = (
     needsApiKeyLoad,
     apiKeyLoading,
     apiKey,
-    apiKeyInput,
-    apiKeyPanelOpen,
-    apiKeyStatus,
     apiKeyWarning,
     loadingQuestion,
     questionError,
@@ -806,6 +736,7 @@ export const render = (
     lastGeneratedTopicKey,
     pendingGenerationTopicKey,
     pendingGenerationId,
+    pendingCommandRefreshNonce,
   },
   dispatch,
 ) => {
@@ -834,7 +765,7 @@ export const render = (
   if (!data || data.error) {
     return (
       <div className="card">
-        <div className="title">Step 1 Question</div>
+        <div className="title">USMLE Practice Question</div>
         <div className="error">{data?.error || "No data yet."}</div>
       </div>
     );
@@ -854,13 +785,31 @@ export const render = (
   if (!hasShape) {
     return (
       <div className="card">
-        <div className="title">Step 1 Question</div>
+        <div className="title">USMLE Practice Question</div>
         <div className="error">Unexpected data shape from command output.</div>
       </div>
     );
   }
 
   const hasApiKey = typeof apiKey === "string" && apiKey.trim().length > 0;
+
+  if (pendingCommandRefreshNonce !== null) {
+    setTimeout(() => {
+      dispatch({
+        type: "FORCE_COMMAND_REFRESH",
+        nonce: pendingCommandRefreshNonce,
+      });
+      run(command)
+        .then((refreshedOutput) => {
+          dispatch({ output: String(refreshedOutput || "") });
+        })
+        .catch((err) => {
+          dispatch({
+            error: `Refresh failed: ${String(err && err.message ? err.message : err)}`,
+          });
+        });
+    }, 0);
+  }
 
   if (
     hasApiKey &&
@@ -889,6 +838,11 @@ export const render = (
     }, 0);
   }
 
+  const onRefresh = (e) => {
+    e.stopPropagation();
+    dispatch({ type: "REFRESH_CLICKED" });
+  };
+
   const onTopicChatGPT = (e) => {
     e.stopPropagation();
     const prompt = `Tell me about ${topic}. I'm studying for USMLE Step 1, so keep things relevant`;
@@ -896,17 +850,18 @@ export const render = (
     run(`open '${escapeForSingleQuotedShell(url)}'`);
   };
 
-  const onSaveApiKey = (e) => {
-    e.stopPropagation();
-    dispatch({ type: "SAVE_API_KEY_START" });
-    saveApiKey(String(apiKeyInput || "").trim(), dispatch);
-  };
-
   return (
     <div className="card">
       <div className="header">
-        <div className="title">{topic || "Step 1 Question"}</div>
+        <div className="title">USMLE Practice Question</div>
         <div className="headerBtns">
+          <button
+            className="refreshBtn"
+            onClick={onRefresh}
+            title="Refresh topic"
+          >
+            🔄
+          </button>
           <button
             className="topicChatgptBtn"
             onClick={onTopicChatGPT}
@@ -914,54 +869,14 @@ export const render = (
           >
             💬
           </button>
-          <button
-            className="apiKeyBtn"
-            onClick={() => dispatch({ type: "TOGGLE_API_KEY_PANEL" })}
-            title="OpenAI API key"
-          >
-            API Key
-          </button>
         </div>
       </div>
 
-      {apiKeyPanelOpen ? (
-        <div className="apiKeyPanel">
-          <input
-            className="apiKeyInput"
-            type="password"
-            placeholder="sk-..."
-            value={apiKeyInput}
-            onInput={(e) =>
-              dispatch({
-                type: "API_KEY_INPUT",
-                value:
-                  e &&
-                  e.target &&
-                  typeof e.target.value === "string"
-                    ? e.target.value
-                    : "",
-              })
-            }
-          />
-          <button className="saveBtn" onClick={onSaveApiKey}>
-            Save
-          </button>
-        </div>
-      ) : null}
-
-      {apiKeyStatus ? <div className="info">{apiKeyStatus}</div> : null}
       {apiKeyWarning ? <div className="warn">{apiKeyWarning}</div> : null}
-
-      <div className="meta">
-        <span>{file}</span>
-        <span>
-          {Number(data.questionsCount)} Q / {Number(data.answersCount)} A
-        </span>
-      </div>
 
       {!hasApiKey ? (
         <div className="warn">
-          Add your OpenAI API key to generate a Step 1 question for this topic.
+          Set `openai-settings.json` with your OpenAI key.
         </div>
       ) : null}
 
@@ -1000,7 +915,9 @@ export const render = (
                     <span className="choiceText">{choice.text}</span>
                   </button>
                   {revealed ? (
-                    <div className="choiceExplanation">{choice.explanation}</div>
+                    <div className="choiceExplanation">
+                      {choice.explanation}
+                    </div>
                   ) : null}
                 </div>
               );
@@ -1058,9 +975,8 @@ export const className = `
     gap: 8px;
   }
 
-  .topicChatgptBtn,
-  .apiKeyBtn,
-  .saveBtn {
+  .refreshBtn,
+  .topicChatgptBtn {
     border: 1px solid rgba(255,255,255,0.18);
     background: rgba(255,255,255,0.10);
     color: white;
@@ -1069,55 +985,17 @@ export const className = `
     cursor: pointer;
   }
 
+  .refreshBtn:hover,
   .topicChatgptBtn:hover,
-  .apiKeyBtn:hover,
-  .saveBtn:hover {
+  .refreshBtn:focus-visible,
+  .topicChatgptBtn:focus-visible {
     background: rgba(255,255,255,0.18);
-  }
-
-  .apiKeyPanel {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .apiKeyInput {
-    flex: 1;
-    border: 1px solid rgba(255,255,255,0.18);
-    border-radius: 10px;
-    background: rgba(255,255,255,0.08);
-    color: white;
-    padding: 7px 10px;
-    outline: none;
-  }
-
-  .apiKeyInput::placeholder {
-    color: rgba(255,255,255,0.45);
-  }
-
-  .meta {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    font-size: 12px;
-    opacity: 0.75;
-    margin: 2px 0 10px;
   }
 
   .loading {
     margin: 8px 0 4px;
     font-size: 14px;
     opacity: 0.9;
-  }
-
-  .info {
-    margin: 0 0 8px;
-    padding: 8px 10px;
-    border-radius: 10px;
-    font-size: 13px;
-    color: rgba(170, 210, 255, 0.98);
-    background: rgba(30, 60, 120, 0.28);
-    border: 1px solid rgba(170, 210, 255, 0.2);
   }
 
   .warn {
