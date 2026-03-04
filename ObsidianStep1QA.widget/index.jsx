@@ -7,6 +7,8 @@ const NOTES_DIR =
   "/Users/kamirov/Library/CloudStorage/GoogleDrive-andrei.khramtsov@gmail.com/My Drive/Hole In The Ground/👨‍⚕️ Medicine/Exploring";
 const SETTINGS_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/openai-settings.json";
+const PENDING_QUESTIONS_STORE =
+  "/Users/kamirov/Projects/ubersicht-widgets/ObsidianStep1QA.widget/pending-questions.json";
 
 export const command = `
 "${NODE}" <<'EOF'
@@ -81,6 +83,7 @@ function main() {
     return;
   }
 
+  const candidates = [];
   for (const file of files) {
     let text;
     try { text = fs.readFileSync(file, "utf8"); }
@@ -101,20 +104,44 @@ function main() {
       a: String(as[i] || ""),
     }));
 
-    console.log(JSON.stringify({
+    candidates.push({
       topic: path.basename(file).replace(/\\.md$/i, ""),
       file: path.basename(file),
       path: file,
       questionsCount: qs.length,
       answersCount: as.length,
       samplePairs,
+    });
+  }
+
+  if (candidates.length < 2) {
+    console.log(JSON.stringify({
+      error:
+        "Need at least two parseable note files with numbered Questions/Answers to generate easy and hard modes.",
     }));
     return;
   }
 
-  console.log(JSON.stringify({
-    error: "No notes found with parseable numbered Questions/Answers of equal length.",
-  }));
+  shuffle(candidates);
+  const easy = candidates[0];
+  const hard = candidates.find((candidate) => candidate.path !== easy.path);
+
+  if (!hard) {
+    console.log(JSON.stringify({
+      error:
+        "Could not pick two distinct note topics by path for easy and hard question generation.",
+    }));
+    return;
+  }
+
+  console.log(
+    JSON.stringify({
+      contexts: [
+        { mode: "easy", ...easy },
+        { mode: "hard", ...hard },
+      ],
+    }),
+  );
 }
 
 main();
@@ -124,11 +151,44 @@ EOF
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
 
+const QUESTION_MODES = ["easy", "hard"];
+const CHOICE_KEYS = ["A", "B", "C", "D", "E"];
+const DEFAULT_MODE = "easy";
+
+const DIFFICULTY_PROFILES = {
+  easy: {
+    label: "easy",
+    title: "Easy",
+    emoji: "🐣",
+    difficultyInstruction:
+      "Target easier board-style difficulty: mostly single-step to moderate reasoning and high-yield fundamentals.",
+  },
+  hard: {
+    label: "hard",
+    title: "Hard",
+    emoji: "🍳",
+    difficultyInstruction:
+      "Target harder board-style difficulty: require multi-step integration, subtler distractors, and less obvious cueing.",
+  },
+};
+
+const scheduledGenerationRequests = new Set();
+const scheduledRefreshRequests = new Set();
+const scheduledCacheMutationRequests = new Set();
+const OPENAI_TIMEOUT_MS = 25000;
+
+const normalizeModeKey = (mode) => {
+  const value = String(mode || "")
+    .trim()
+    .toLowerCase();
+  return QUESTION_MODES.includes(value) ? value : "";
+};
+
 const normalizeChoiceKey = (key) => {
   const upper = String(key || "")
     .trim()
     .toUpperCase();
-  return ["A", "B", "C", "D", "E"].includes(upper) ? upper : "";
+  return CHOICE_KEYS.includes(upper) ? upper : "";
 };
 
 const normalizeQuestion = (input) => {
@@ -178,8 +238,7 @@ const normalizeQuestion = (input) => {
     choices.push({ key, text, explanation });
   }
 
-  const requiredKeys = ["A", "B", "C", "D", "E"];
-  for (const key of requiredKeys) {
+  for (const key of CHOICE_KEYS) {
     if (!seen.has(key)) {
       return { question: null, error: `Missing choice ${key}.` };
     }
@@ -196,6 +255,191 @@ const normalizeQuestion = (input) => {
     },
     error: null,
   };
+};
+
+const normalizeSamplePair = (pair) => {
+  if (!pair || typeof pair !== "object") return null;
+  const q = typeof pair.q === "string" ? pair.q.trim() : "";
+  const a = typeof pair.a === "string" ? pair.a.trim() : "";
+  return q && a ? { q, a } : null;
+};
+
+const normalizeTopicContext = (entry) => {
+  if (!entry || typeof entry !== "object") return null;
+
+  const topic = typeof entry.topic === "string" ? entry.topic.trim() : "";
+  const file = typeof entry.file === "string" ? entry.file.trim() : "";
+  const path = typeof entry.path === "string" ? entry.path.trim() : "";
+  const questionsCount = Number(entry.questionsCount);
+  const answersCount = Number(entry.answersCount);
+
+  const rawPairs = Array.isArray(entry.samplePairs) ? entry.samplePairs : [];
+  const samplePairs = rawPairs
+    .slice(0, 3)
+    .map((pair) => normalizeSamplePair(pair))
+    .filter(Boolean);
+
+  if (!topic || !file || !path) return null;
+  if (!Number.isFinite(questionsCount) || !Number.isFinite(answersCount)) {
+    return null;
+  }
+
+  return {
+    topic,
+    file,
+    path,
+    questionsCount,
+    answersCount,
+    samplePairs,
+  };
+};
+
+const parseModeContext = (entry) => {
+  if (!entry || typeof entry !== "object") return null;
+
+  const mode = normalizeModeKey(entry.mode);
+  const topicContext = normalizeTopicContext(entry);
+  if (!mode || !topicContext) return null;
+
+  return {
+    mode,
+    ...topicContext,
+  };
+};
+
+const parseCommandPayload = (rawOutput) => {
+  let parsed;
+  try {
+    parsed = JSON.parse((rawOutput || "").trim());
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object" || parsed.error) return null;
+  if (!Array.isArray(parsed.contexts)) return null;
+
+  const contexts = { easy: null, hard: null };
+  for (const entry of parsed.contexts) {
+    const context = parseModeContext(entry);
+    if (!context) return null;
+    if (contexts[context.mode]) return null;
+    contexts[context.mode] = context;
+  }
+
+  if (!contexts.easy || !contexts.hard) return null;
+  if (contexts.easy.path === contexts.hard.path) return null;
+
+  const warning =
+    typeof parsed.warning === "string" && parsed.warning.trim()
+      ? parsed.warning.trim()
+      : null;
+
+  return { contexts, warning };
+};
+
+const shuffleInPlace = (arr) => {
+  for (let i = arr.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
+const randomizeQuestionChoices = (question) => {
+  if (!question || typeof question !== "object") return question;
+  if (!Array.isArray(question.choices) || question.choices.length !== 5) {
+    return question;
+  }
+
+  const tagged = question.choices.map((choice) => ({
+    ...choice,
+    __isCorrect: choice.key === question.correctKey,
+  }));
+
+  shuffleInPlace(tagged);
+
+  const choices = [];
+  let nextCorrectKey = "";
+
+  for (let i = 0; i < tagged.length; i += 1) {
+    const src = tagged[i];
+    const key = CHOICE_KEYS[i];
+    if (!key) continue;
+    choices.push({
+      key,
+      text: src.text,
+      explanation: src.explanation,
+    });
+    if (src.__isCorrect) nextCorrectKey = key;
+  }
+
+  if (!nextCorrectKey) return question;
+
+  return {
+    ...question,
+    choices,
+    correctKey: nextCorrectKey,
+  };
+};
+
+const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
+  const safeMode = normalizeModeKey(mode) || DEFAULT_MODE;
+  const profile =
+    difficultyProfile && typeof difficultyProfile === "object"
+      ? difficultyProfile
+      : DIFFICULTY_PROFILES[safeMode];
+  const contextData =
+    topicContext && typeof topicContext === "object" ? topicContext : {};
+  const cleanedPairs = Array.isArray(contextData.samplePairs)
+    ? contextData.samplePairs.slice(0, 3)
+    : [];
+
+  const sourceContext = cleanedPairs
+    .map((pair, idx) => {
+      const q = pair && typeof pair.q === "string" ? pair.q.trim() : "";
+      const a = pair && typeof pair.a === "string" ? pair.a.trim() : "";
+      return `${idx + 1}. Q: ${q}\nA: ${a}`;
+    })
+    .join("\n\n");
+
+  const systemMessage =
+    "You create rigorous USMLE Step 1 single-best-answer questions. Return only valid JSON.";
+
+  const userMessage = [
+    `Difficulty mode: ${safeMode.toUpperCase()}`,
+    `Topic: ${contextData.topic || "Unknown topic"}`,
+    `Source file: ${contextData.file || "Unknown file"}`,
+    `Source path: ${contextData.path || "Unknown path"}`,
+    "Use this source context to design one clinically relevant Step 1 question:",
+    sourceContext || "(No source Q/A snippets available)",
+    "",
+    "Return JSON with this exact shape:",
+    "{",
+    '  "stem": "string",',
+    '  "choices": [',
+    '    { "key": "A", "text": "string", "explanation": "string" },',
+    '    { "key": "B", "text": "string", "explanation": "string" },',
+    '    { "key": "C", "text": "string", "explanation": "string" },',
+    '    { "key": "D", "text": "string", "explanation": "string" },',
+    '    { "key": "E", "text": "string", "explanation": "string" }',
+    "  ],",
+    '  "correctKey": "A|B|C|D|E",',
+    '  "correctExplanation": "string"',
+    "}",
+    "",
+    "Rules:",
+    "- Exactly five choices A-E.",
+    "- Exactly one correct answer.",
+    "- Vary terminology and phrasing; do not copy source wording verbatim.",
+    "- Keep stems less cue-heavy and avoid obvious giveaway language.",
+    "- Build plausible distractors that force discrimination between close concepts.",
+    "- Keep explanations concise, specific, and mechanistic.",
+    `- ${profile.difficultyInstruction}`,
+    "- The correct answer may be any key A-E; do not bias toward one position.",
+    "- Do not include markdown fences or extra text outside JSON.",
+  ].join("\n");
+
+  return { systemMessage, userMessage };
 };
 
 const extractJsonFromText = (text) => {
@@ -250,6 +494,82 @@ const extractResponseText = (data) => {
   }
 
   return fragments.join("\n").trim();
+};
+
+const emptyCachedByMode = () => ({ easy: null, hard: null });
+
+const parsePendingQuestionsStore = (rawOutput) => {
+  let parsed;
+  try {
+    parsed = JSON.parse((rawOutput || "").trim());
+  } catch {
+    return {
+      cachedQuestionByMode: emptyCachedByMode(),
+      warning:
+        "Pending question cache file is malformed JSON. Ignoring cached questions.",
+    };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Number(parsed.version) !== 1) {
+    return {
+      cachedQuestionByMode: emptyCachedByMode(),
+      warning:
+        "Pending question cache schema is invalid. Ignoring cached questions.",
+    };
+  }
+
+  const questions =
+    parsed.questions && typeof parsed.questions === "object"
+      ? parsed.questions
+      : null;
+  if (!questions) {
+    return {
+      cachedQuestionByMode: emptyCachedByMode(),
+      warning:
+        "Pending question cache is missing `questions`. Ignoring cached questions.",
+    };
+  }
+
+  const cachedQuestionByMode = emptyCachedByMode();
+  const invalidModes = [];
+  for (const mode of QUESTION_MODES) {
+    const entry = questions[mode];
+    if (entry === null || typeof entry === "undefined") continue;
+    if (!entry || typeof entry !== "object") {
+      invalidModes.push(mode);
+      continue;
+    }
+
+    const normalized = normalizeQuestion(entry.question);
+    const topicContext = normalizeTopicContext(entry.topicContext);
+    const savedAt =
+      typeof entry.savedAt === "string" && entry.savedAt.trim()
+        ? entry.savedAt.trim()
+        : "";
+
+    if (
+      !normalized.question ||
+      !topicContext ||
+      !savedAt ||
+      !Number.isFinite(Date.parse(savedAt))
+    ) {
+      invalidModes.push(mode);
+      continue;
+    }
+
+    cachedQuestionByMode[mode] = {
+      question: normalized.question,
+      topicContext,
+      savedAt,
+    };
+  }
+
+  const warning =
+    invalidModes.length > 0
+      ? `Pending question cache had invalid entry for: ${invalidModes.join(", ")}. Ignoring those mode(s).`
+      : null;
+
+  return { cachedQuestionByMode, warning };
 };
 
 const loadApiKey = (dispatch) => {
@@ -345,50 +665,208 @@ main();
     });
 };
 
+const loadPendingQuestionsCache = (dispatch) => {
+  const nodeScript = `
+const fs = require("fs");
+
+const STORE = '${escapeForSingleQuotedShell(PENDING_QUESTIONS_STORE)}';
+
+function main() {
+  if (!fs.existsSync(STORE)) {
+    console.log(JSON.stringify({
+      ok: true,
+      exists: false,
+      raw: JSON.stringify({ version: 1, questions: { easy: null, hard: null } }),
+      warning: null,
+    }));
+    return;
+  }
+
+  let raw;
+  try {
+    raw = fs.readFileSync(STORE, "utf8");
+  } catch (err) {
+    console.log(JSON.stringify({
+      ok: false,
+      error: "Could not read pending question cache: " + String(err && err.message ? err.message : err),
+    }));
+    return;
+  }
+
+  console.log(JSON.stringify({ ok: true, exists: true, raw, warning: null }));
+}
+
+main();
+`;
+
+  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
+    .then((result) => {
+      try {
+        const data = JSON.parse(String(result || "").trim());
+        if (!data || !data.ok || typeof data.raw !== "string") {
+          dispatch({
+            type: "LOAD_CACHE_RESULT",
+            ok: false,
+            cachedQuestionByMode: emptyCachedByMode(),
+            warning: null,
+            error: String((data && data.error) || "Could not load pending question cache."),
+          });
+          return;
+        }
+
+        const parsed = parsePendingQuestionsStore(data.raw);
+        dispatch({
+          type: "LOAD_CACHE_RESULT",
+          ok: true,
+          cachedQuestionByMode: parsed.cachedQuestionByMode,
+          warning:
+            parsed.warning ||
+            (typeof data.warning === "string" ? data.warning : null),
+          error: null,
+        });
+      } catch {
+        dispatch({
+          type: "LOAD_CACHE_RESULT",
+          ok: false,
+          cachedQuestionByMode: emptyCachedByMode(),
+          warning: null,
+          error: "Could not parse pending question cache load response.",
+        });
+      }
+    })
+    .catch((err) => {
+      dispatch({
+        type: "LOAD_CACHE_RESULT",
+        ok: false,
+        cachedQuestionByMode: emptyCachedByMode(),
+        warning: null,
+        error: `Pending question cache load failed: ${String(err && err.message ? err.message : err)}`,
+      });
+    });
+};
+
+const persistPendingQuestionForMode = ({ mode, cachedEntry }, dispatch) => {
+  const safeMode = normalizeModeKey(mode);
+  if (!safeMode) return;
+
+  const payload = cachedEntry
+    ? {
+        question: cachedEntry.question,
+        topicContext: cachedEntry.topicContext,
+        savedAt:
+          typeof cachedEntry.savedAt === "string" && cachedEntry.savedAt.trim()
+            ? cachedEntry.savedAt.trim()
+            : new Date().toISOString(),
+      }
+    : null;
+
+  const nodeScript = `
+const fs = require("fs");
+const path = require("path");
+
+const STORE = '${escapeForSingleQuotedShell(PENDING_QUESTIONS_STORE)}';
+const MODE = ${JSON.stringify(safeMode)};
+const ENTRY = ${JSON.stringify(payload)};
+
+function readCurrentStore() {
+  if (!fs.existsSync(STORE)) {
+    return { version: 1, questions: { easy: null, hard: null } };
+  }
+
+  try {
+    const raw = fs.readFileSync(STORE, "utf8");
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      Number(parsed.version) === 1 &&
+      parsed.questions &&
+      typeof parsed.questions === "object"
+    ) {
+      return {
+        version: 1,
+        questions: {
+          easy:
+            typeof parsed.questions.easy === "undefined"
+              ? null
+              : parsed.questions.easy,
+          hard:
+            typeof parsed.questions.hard === "undefined"
+              ? null
+              : parsed.questions.hard,
+        },
+      };
+    }
+  } catch {
+    return { version: 1, questions: { easy: null, hard: null } };
+  }
+
+  return { version: 1, questions: { easy: null, hard: null } };
+}
+
+function main() {
+  const current = readCurrentStore();
+  current.questions[MODE] = ENTRY;
+
+  try {
+    fs.mkdirSync(path.dirname(STORE), { recursive: true });
+    fs.writeFileSync(STORE, JSON.stringify(current, null, 2), "utf8");
+  } catch (err) {
+    console.log(JSON.stringify({
+      ok: false,
+      error: "Could not write pending question cache: " + String(err && err.message ? err.message : err),
+    }));
+    return;
+  }
+
+  console.log(JSON.stringify({ ok: true }));
+}
+
+main();
+`;
+
+  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
+    .then((result) => {
+      try {
+        const data = JSON.parse(String(result || "").trim());
+        dispatch({
+          type: "PERSIST_CACHE_RESULT",
+          mode: safeMode,
+          ok: !!(data && data.ok),
+          error:
+            data && data.ok
+              ? null
+              : String((data && data.error) || "Could not persist pending question cache."),
+        });
+      } catch {
+        dispatch({
+          type: "PERSIST_CACHE_RESULT",
+          mode: safeMode,
+          ok: false,
+          error: "Could not parse pending question cache persist response.",
+        });
+      }
+    })
+    .catch((err) => {
+      dispatch({
+        type: "PERSIST_CACHE_RESULT",
+        mode: safeMode,
+        ok: false,
+        error: `Pending question cache persist failed: ${String(err && err.message ? err.message : err)}`,
+      });
+    });
+};
+
 const generateStepQuestion = async (
-  { apiKey, topic, file, path, samplePairs, generationId, topicKey },
+  { apiKey, mode, difficultyProfile, topicContext, generationId, topicKey },
   dispatch,
 ) => {
-  const cleanedPairs = Array.isArray(samplePairs)
-    ? samplePairs.slice(0, 3)
-    : [];
-  const context = cleanedPairs
-    .map((pair, idx) => {
-      const q = pair && typeof pair.q === "string" ? pair.q.trim() : "";
-      const a = pair && typeof pair.a === "string" ? pair.a.trim() : "";
-      return `${idx + 1}. Q: ${q}\nA: ${a}`;
-    })
-    .join("\n\n");
-
-  const systemMessage =
-    "You create rigorous USMLE Step 1 single-best-answer questions. Return only valid JSON.";
-  const userMessage = [
-    `Topic: ${topic || "Unknown topic"}`,
-    `Source file: ${file || "Unknown file"}`,
-    `Source path: ${path || "Unknown path"}`,
-    "Use this source context to design one clinically relevant Step 1 question:",
-    context || "(No source Q/A snippets available)",
-    "",
-    "Return JSON with this exact shape:",
-    "{",
-    '  "stem": "string",',
-    '  "choices": [',
-    '    { "key": "A", "text": "string", "explanation": "string" },',
-    '    { "key": "B", "text": "string", "explanation": "string" },',
-    '    { "key": "C", "text": "string", "explanation": "string" },',
-    '    { "key": "D", "text": "string", "explanation": "string" },',
-    '    { "key": "E", "text": "string", "explanation": "string" }',
-    "  ],",
-    '  "correctKey": "A|B|C|D|E",',
-    '  "correctExplanation": "string"',
-    "}",
-    "",
-    "Rules:",
-    "- Exactly five choices A-E.",
-    "- Exactly one correct answer.",
-    "- Keep explanations concise but specific and mechanistic.",
-    "- Do not include markdown fences or extra text outside JSON.",
-  ].join("\n");
+  const safeMode = normalizeModeKey(mode) || DEFAULT_MODE;
+  const { systemMessage, userMessage } = buildPromptMessages({
+    mode: safeMode,
+    difficultyProfile,
+    topicContext,
+  });
 
   const schema = {
     type: "object",
@@ -403,22 +881,26 @@ const generateStepQuestion = async (
           type: "object",
           additionalProperties: false,
           properties: {
-            key: { type: "string", enum: ["A", "B", "C", "D", "E"] },
+            key: { type: "string", enum: CHOICE_KEYS },
             text: { type: "string" },
             explanation: { type: "string" },
           },
           required: ["key", "text", "explanation"],
         },
       },
-      correctKey: { type: "string", enum: ["A", "B", "C", "D", "E"] },
+      correctKey: { type: "string", enum: CHOICE_KEYS },
       correctExplanation: { type: "string" },
     },
     required: ["stem", "choices", "correctKey", "correctExplanation"],
   };
 
+  let timeoutId = null;
   try {
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -450,6 +932,7 @@ const generateStepQuestion = async (
       const body = await response.text();
       dispatch({
         type: "GENERATE_RESULT",
+        mode: safeMode,
         ok: false,
         generationId,
         topicKey,
@@ -465,6 +948,7 @@ const generateStepQuestion = async (
     if (!json) {
       dispatch({
         type: "GENERATE_RESULT",
+        mode: safeMode,
         ok: false,
         generationId,
         topicKey,
@@ -477,6 +961,7 @@ const generateStepQuestion = async (
     if (!normalized.question) {
       dispatch({
         type: "GENERATE_RESULT",
+        mode: safeMode,
         ok: false,
         generationId,
         topicKey,
@@ -485,22 +970,160 @@ const generateStepQuestion = async (
       return;
     }
 
+    const randomizedQuestion = randomizeQuestionChoices(normalized.question);
+    const normalizedTopicContext = normalizeTopicContext(topicContext);
+    const cachedEntry =
+      randomizedQuestion && normalizedTopicContext
+        ? {
+            question: randomizedQuestion,
+            topicContext: normalizedTopicContext,
+            savedAt: new Date().toISOString(),
+          }
+        : null;
+
     dispatch({
       type: "GENERATE_RESULT",
+      mode: safeMode,
       ok: true,
       generationId,
       topicKey,
-      question: normalized.question,
+      question: randomizedQuestion,
+      cachedEntry,
     });
+
+    if (cachedEntry) {
+      persistPendingQuestionForMode(
+        { mode: safeMode, cachedEntry },
+        dispatch,
+      );
+    }
   } catch (err) {
+    const isTimeout =
+      err && typeof err === "object" && err.name === "AbortError";
     dispatch({
       type: "GENERATE_RESULT",
+      mode: safeMode,
       ok: false,
       generationId,
       topicKey,
-      error: `OpenAI request error: ${String(err && err.message ? err.message : err)}`,
+      error: isTimeout
+        ? `OpenAI request timed out after ${Math.round(OPENAI_TIMEOUT_MS / 1000)}s.`
+        : `OpenAI request error: ${String(err && err.message ? err.message : err)}`,
     });
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
   }
+};
+
+const emptyPendingByMode = () => ({ easy: null, hard: null });
+const emptyContextByMode = () => ({ easy: null, hard: null });
+const emptyQuestionByMode = () => ({ easy: null, hard: null });
+const emptyErrorByMode = () => ({ easy: null, hard: null });
+const emptySelectedByMode = () => ({ easy: "", hard: "" });
+const emptyRevealedByMode = () => ({ easy: false, hard: false });
+const emptyLoadingByMode = () => ({ easy: false, hard: false });
+const emptyGenerationIdByMode = () => ({ easy: 0, hard: 0 });
+
+const makeTopicKey = (mode, context) => {
+  const safeMode = normalizeModeKey(mode);
+  if (!safeMode || !context || typeof context !== "object") return "";
+  const topic = typeof context.topic === "string" ? context.topic : "";
+  const path = typeof context.path === "string" ? context.path : "";
+  return `${safeMode}::${path}::${topic}`;
+};
+
+const scheduleGenerationForContexts = (baseState, payload) => {
+  const contexts = payload && payload.contexts ? payload.contexts : null;
+  if (!contexts || !contexts.easy || !contexts.hard) {
+    return {
+      ...baseState,
+      topicContextByMode: emptyContextByMode(),
+      loadingByMode: emptyLoadingByMode(),
+      errorByMode: emptyErrorByMode(),
+      questionByMode: emptyQuestionByMode(),
+      selectedKeyByMode: emptySelectedByMode(),
+      revealedByMode: emptyRevealedByMode(),
+      pendingGenerationByMode: emptyPendingByMode(),
+      latestGenerationIdByMode: emptyGenerationIdByMode(),
+    };
+  }
+
+  const cacheLoaded = !!baseState.cacheLoaded;
+  if (!cacheLoaded) {
+    return {
+      ...baseState,
+      activeMode: DEFAULT_MODE,
+      topicContextByMode: {
+        easy: contexts.easy,
+        hard: contexts.hard,
+      },
+      loadingByMode: emptyLoadingByMode(),
+      errorByMode: emptyErrorByMode(),
+      pendingGenerationByMode: emptyPendingByMode(),
+    };
+  }
+
+  const hasApiKey =
+    typeof baseState.apiKey === "string" && baseState.apiKey.trim().length > 0;
+  let nextGenerationCounter = Number(baseState.generationCounter);
+  const nextTopicContextByMode = emptyContextByMode();
+  const nextLoadingByMode = emptyLoadingByMode();
+  const nextQuestionByMode = emptyQuestionByMode();
+  const nextErrorByMode = emptyErrorByMode();
+  const nextSelectedByMode = emptySelectedByMode();
+  const nextRevealedByMode = emptyRevealedByMode();
+  const nextPendingByMode = emptyPendingByMode();
+  const nextGenerationIdByMode = {
+    ...baseState.latestGenerationIdByMode,
+  };
+
+  for (const mode of QUESTION_MODES) {
+    const context = contexts[mode];
+    const cachedEntry =
+      baseState.cachedQuestionByMode &&
+      baseState.cachedQuestionByMode[mode] &&
+      typeof baseState.cachedQuestionByMode[mode] === "object"
+        ? baseState.cachedQuestionByMode[mode]
+        : null;
+
+    if (cachedEntry) {
+      nextTopicContextByMode[mode] = cachedEntry.topicContext || context || null;
+      nextQuestionByMode[mode] = cachedEntry.question || null;
+      nextLoadingByMode[mode] = false;
+      nextErrorByMode[mode] = null;
+      continue;
+    }
+
+    nextTopicContextByMode[mode] = context || null;
+    nextQuestionByMode[mode] = null;
+
+    if (hasApiKey && context) {
+      const nextGenerationId = nextGenerationCounter + 1;
+      nextGenerationCounter = nextGenerationId;
+      nextLoadingByMode[mode] = true;
+      nextPendingByMode[mode] = {
+        generationId: nextGenerationId,
+        topicKey: makeTopicKey(mode, context),
+      };
+      nextGenerationIdByMode[mode] = nextGenerationId;
+    } else {
+      nextLoadingByMode[mode] = false;
+    }
+  }
+
+  return {
+    ...baseState,
+    activeMode: DEFAULT_MODE,
+    topicContextByMode: nextTopicContextByMode,
+    loadingByMode: nextLoadingByMode,
+    errorByMode: nextErrorByMode,
+    questionByMode: nextQuestionByMode,
+    selectedKeyByMode: nextSelectedByMode,
+    revealedByMode: nextRevealedByMode,
+    pendingGenerationByMode: nextPendingByMode,
+    latestGenerationIdByMode: nextGenerationIdByMode,
+    generationCounter: nextGenerationCounter,
+  };
 };
 
 export const initialState = {
@@ -512,82 +1135,62 @@ export const initialState = {
   apiKeyLoading: false,
   apiKey: "",
   apiKeyWarning: null,
+  needsCacheLoad: true,
+  cacheLoaded: false,
+  cacheLoading: false,
+  cacheWarning: null,
+  cachedQuestionByMode: emptyCachedByMode(),
 
-  loadingQuestion: false,
-  questionError: null,
-  question: null,
-  selectedKey: "",
-  revealed: false,
+  activeMode: DEFAULT_MODE,
+  loadingByMode: emptyLoadingByMode(),
+  errorByMode: emptyErrorByMode(),
+  questionByMode: emptyQuestionByMode(),
+  selectedKeyByMode: emptySelectedByMode(),
+  revealedByMode: emptyRevealedByMode(),
+  topicContextByMode: emptyContextByMode(),
+  pendingGenerationByMode: emptyPendingByMode(),
+  latestGenerationIdByMode: emptyGenerationIdByMode(),
+  generationCounter: 0,
 
-  generationId: 0,
-  lastGeneratedTopicKey: "",
-  pendingGenerationTopicKey: null,
-  pendingGenerationId: null,
   refreshNonce: 0,
   pendingCommandRefreshNonce: null,
 };
 
 export const updateState = (event, prev) => {
-  const parseCommandPayload = (rawOutput) => {
-    try {
-      const parsed = JSON.parse((rawOutput || "").trim());
-      if (!parsed || typeof parsed !== "object" || parsed.error) return null;
-
-      const topic = typeof parsed.topic === "string" ? parsed.topic : "";
-      const file = typeof parsed.file === "string" ? parsed.file : "";
-      const path = typeof parsed.path === "string" ? parsed.path : "";
-      const samplePairs = Array.isArray(parsed.samplePairs)
-        ? parsed.samplePairs
-        : [];
-      const hasShape =
-        !!topic &&
-        !!file &&
-        !!path &&
-        Number.isFinite(Number(parsed.questionsCount)) &&
-        Number.isFinite(Number(parsed.answersCount));
-
-      if (!hasShape) return null;
-      return { topic, path, samplePairs };
-    } catch {
-      return null;
-    }
-  };
-
-  const maybeScheduleGeneration = (baseState, parsedPayload) => {
-    const hasApiKey =
-      typeof baseState.apiKey === "string" &&
-      baseState.apiKey.trim().length > 0;
-    if (!hasApiKey || !parsedPayload) {
-      return {
-        ...baseState,
-        loadingQuestion: false,
-        pendingGenerationTopicKey: null,
-        pendingGenerationId: null,
-      };
-    }
-
-    const topicKey = `${parsedPayload.path}::${parsedPayload.topic}`;
-    if (baseState.lastGeneratedTopicKey === topicKey) {
-      return {
-        ...baseState,
-        pendingGenerationTopicKey: null,
-        pendingGenerationId: null,
-      };
-    }
-
-    const nextGenerationId = Number(baseState.generationId) + 1;
+  if (event && event.type === "LOAD_CACHE_START") {
     return {
-      ...baseState,
-      loadingQuestion: true,
-      questionError: null,
-      question: null,
-      selectedKey: "",
-      revealed: false,
-      generationId: nextGenerationId,
-      pendingGenerationTopicKey: topicKey,
-      pendingGenerationId: nextGenerationId,
+      ...prev,
+      needsCacheLoad: false,
+      cacheLoading: true,
+      cacheWarning: null,
     };
-  };
+  }
+
+  if (event && event.type === "LOAD_CACHE_RESULT") {
+    const next = {
+      ...prev,
+      needsCacheLoad: false,
+      cacheLoaded: true,
+      cacheLoading: false,
+      cacheWarning: event.ok ? event.warning || null : event.error || null,
+      cachedQuestionByMode:
+        event.ok &&
+        event.cachedQuestionByMode &&
+        typeof event.cachedQuestionByMode === "object"
+          ? {
+              easy: event.cachedQuestionByMode.easy || null,
+              hard: event.cachedQuestionByMode.hard || null,
+            }
+          : emptyCachedByMode(),
+    };
+
+    const parsedPayload = parseCommandPayload(next.output);
+    if (parsedPayload) {
+      return scheduleGenerationForContexts(next, parsedPayload);
+    }
+
+    return next;
+  }
 
   if (event && event.type === "LOAD_API_KEY_START") {
     return {
@@ -599,32 +1202,45 @@ export const updateState = (event, prev) => {
   }
 
   if (event && event.type === "LOAD_API_KEY_RESULT") {
-    const key = event.ok ? String(event.openaiApiKey || "") : "";
-    return {
+    const nextKey = event.ok ? String(event.openaiApiKey || "") : "";
+    const next = {
       ...prev,
       needsApiKeyLoad: false,
       apiKeyLoaded: true,
       apiKeyLoading: false,
-      apiKey: key,
+      apiKey: nextKey,
       apiKeyWarning: event.ok ? event.warning || null : event.error || null,
     };
+
+    const hadApiKey =
+      typeof prev.apiKey === "string" && prev.apiKey.trim().length > 0;
+    const hasApiKey = nextKey.trim().length > 0;
+    if (!hasApiKey) {
+      return {
+        ...next,
+        loadingByMode: emptyLoadingByMode(),
+        pendingGenerationByMode: emptyPendingByMode(),
+      };
+    }
+
+    if (!hadApiKey) {
+      const parsedPayload = parseCommandPayload(prev.output);
+      if (parsedPayload) {
+        return scheduleGenerationForContexts(next, parsedPayload);
+      }
+    }
+
+    return next;
   }
 
   if (event && event.type === "REFRESH_CLICKED") {
     const nextNonce = Number(prev.refreshNonce) + 1;
     return {
       ...prev,
+      activeMode: DEFAULT_MODE,
       refreshNonce: nextNonce,
       pendingCommandRefreshNonce: nextNonce,
       error: null,
-      loadingQuestion: true,
-      questionError: null,
-      question: null,
-      selectedKey: "",
-      revealed: false,
-      lastGeneratedTopicKey: "",
-      pendingGenerationTopicKey: null,
-      pendingGenerationId: null,
     };
   }
 
@@ -638,59 +1254,136 @@ export const updateState = (event, prev) => {
     };
   }
 
-  if (event && event.type === "GENERATION_REQUEST_SENT") {
-    if (
-      Number(event.generationId) !== Number(prev.pendingGenerationId) ||
-      String(event.topicKey || "") !==
-        String(prev.pendingGenerationTopicKey || "")
-    ) {
-      return prev;
-    }
+  if (event && event.type === "MODE_SELECTED") {
+    const mode = normalizeModeKey(event.mode);
+    if (!mode) return prev;
     return {
       ...prev,
-      pendingGenerationTopicKey: null,
-      pendingGenerationId: null,
+      activeMode: mode,
+    };
+  }
+
+  if (event && event.type === "GENERATION_REQUEST_SENT") {
+    const mode = normalizeModeKey(event.mode);
+    if (!mode) return prev;
+
+    const pending = prev.pendingGenerationByMode[mode];
+    if (!pending) return prev;
+    if (Number(event.generationId) !== Number(pending.generationId)) {
+      return prev;
+    }
+    if (String(event.topicKey || "") !== String(pending.topicKey || "")) {
+      return prev;
+    }
+
+    return {
+      ...prev,
+      pendingGenerationByMode: {
+        ...prev.pendingGenerationByMode,
+        [mode]: null,
+      },
     };
   }
 
   if (event && event.type === "GENERATE_RESULT") {
-    if (Number(event.generationId) !== Number(prev.generationId)) return prev;
+    const mode = normalizeModeKey(event.mode);
+    if (!mode) return prev;
+
+    if (
+      Number(event.generationId) !== Number(prev.latestGenerationIdByMode[mode])
+    ) {
+      return prev;
+    }
 
     if (!event.ok) {
       return {
         ...prev,
-        loadingQuestion: false,
-        question: null,
-        questionError: String(event.error || "Could not generate question."),
-        lastGeneratedTopicKey: String(event.topicKey || ""),
-        pendingGenerationTopicKey: null,
-        pendingGenerationId: null,
-        pendingCommandRefreshNonce: null,
+        loadingByMode: {
+          ...prev.loadingByMode,
+          [mode]: false,
+        },
+        questionByMode: {
+          ...prev.questionByMode,
+          [mode]: null,
+        },
+        errorByMode: {
+          ...prev.errorByMode,
+          [mode]: String(event.error || "Could not generate question."),
+        },
+        selectedKeyByMode: {
+          ...prev.selectedKeyByMode,
+          [mode]: "",
+        },
+        revealedByMode: {
+          ...prev.revealedByMode,
+          [mode]: false,
+        },
       };
     }
 
     return {
       ...prev,
-      loadingQuestion: false,
-      questionError: null,
-      question: event.question || null,
-      selectedKey: "",
-      revealed: false,
-      lastGeneratedTopicKey: String(event.topicKey || ""),
-      pendingGenerationTopicKey: null,
-      pendingGenerationId: null,
-      pendingCommandRefreshNonce: null,
+      loadingByMode: {
+        ...prev.loadingByMode,
+        [mode]: false,
+      },
+      errorByMode: {
+        ...prev.errorByMode,
+        [mode]: null,
+      },
+      questionByMode: {
+        ...prev.questionByMode,
+        [mode]: event.question || null,
+      },
+      cachedQuestionByMode: {
+        ...prev.cachedQuestionByMode,
+        [mode]:
+          event.cachedEntry && typeof event.cachedEntry === "object"
+            ? event.cachedEntry
+            : null,
+      },
+      selectedKeyByMode: {
+        ...prev.selectedKeyByMode,
+        [mode]: "",
+      },
+      revealedByMode: {
+        ...prev.revealedByMode,
+        [mode]: false,
+      },
     };
   }
 
   if (event && event.type === "SELECT_ANSWER") {
-    if (prev.revealed) return prev;
+    const mode =
+      normalizeModeKey(event.mode) || normalizeModeKey(prev.activeMode);
+    if (!mode || prev.revealedByMode[mode]) return prev;
+
     const key = normalizeChoiceKey(event.key);
     if (!key) return prev;
     return {
       ...prev,
-      selectedKey: key,
-      revealed: true,
+      selectedKeyByMode: {
+        ...prev.selectedKeyByMode,
+        [mode]: key,
+      },
+      revealedByMode: {
+        ...prev.revealedByMode,
+        [mode]: true,
+      },
+      cachedQuestionByMode: {
+        ...prev.cachedQuestionByMode,
+        [mode]: null,
+      },
+    };
+  }
+
+  if (event && event.type === "PERSIST_CACHE_RESULT") {
+    if (event.ok) return prev;
+    return {
+      ...prev,
+      cacheWarning:
+        String(event.error || "").trim() ||
+        "Could not persist pending question cache.",
     };
   }
 
@@ -703,17 +1396,25 @@ export const updateState = (event, prev) => {
       ...prev,
       output: event.output,
       error: null,
-      loadingQuestion: false,
-      questionError: null,
-      question: null,
-      selectedKey: "",
-      revealed: false,
-      lastGeneratedTopicKey: "",
-      pendingGenerationTopicKey: null,
-      pendingGenerationId: null,
       pendingCommandRefreshNonce: null,
     };
-    return maybeScheduleGeneration(base, parseCommandPayload(event.output));
+    const parsedPayload = parseCommandPayload(event.output);
+    if (!parsedPayload) {
+      return {
+        ...base,
+        activeMode: DEFAULT_MODE,
+        loadingByMode: emptyLoadingByMode(),
+        errorByMode: emptyErrorByMode(),
+        questionByMode: emptyQuestionByMode(),
+        selectedKeyByMode: emptySelectedByMode(),
+        revealedByMode: emptyRevealedByMode(),
+        topicContextByMode: emptyContextByMode(),
+        pendingGenerationByMode: emptyPendingByMode(),
+        latestGenerationIdByMode: emptyGenerationIdByMode(),
+      };
+    }
+
+    return scheduleGenerationForContexts(base, parsedPayload);
   }
 
   return prev;
@@ -723,19 +1424,24 @@ export const render = (
   {
     output,
     error,
+    cacheLoaded,
+    needsCacheLoad,
+    cacheLoading,
+    cacheWarning,
+    cachedQuestionByMode,
     apiKeyLoaded,
     needsApiKeyLoad,
     apiKeyLoading,
     apiKey,
     apiKeyWarning,
-    loadingQuestion,
-    questionError,
-    question,
-    selectedKey,
-    revealed,
-    lastGeneratedTopicKey,
-    pendingGenerationTopicKey,
-    pendingGenerationId,
+    activeMode,
+    loadingByMode,
+    errorByMode,
+    questionByMode,
+    selectedKeyByMode,
+    revealedByMode,
+    topicContextByMode,
+    pendingGenerationByMode,
     pendingCommandRefreshNonce,
   },
   dispatch,
@@ -747,6 +1453,13 @@ export const render = (
     }, 0);
   }
 
+  if (needsCacheLoad && !cacheLoaded && !cacheLoading) {
+    setTimeout(() => {
+      dispatch({ type: "LOAD_CACHE_START" });
+      loadPendingQuestionsCache(dispatch);
+    }, 0);
+  }
+
   if (error) {
     return (
       <div className="card">
@@ -755,34 +1468,24 @@ export const render = (
     );
   }
 
-  let data;
+  let rawData;
   try {
-    data = JSON.parse((output || "").trim());
+    rawData = JSON.parse((output || "").trim());
   } catch {
-    data = { error: "Could not parse JSON output.", raw: output };
+    rawData = { error: "Could not parse JSON output.", raw: output };
   }
 
-  if (!data || data.error) {
+  if (!rawData || rawData.error) {
     return (
       <div className="card">
         <div className="title">USMLE Practice Question</div>
-        <div className="error">{data?.error || "No data yet."}</div>
+        <div className="error">{rawData?.error || "No data yet."}</div>
       </div>
     );
   }
 
-  const topic = typeof data.topic === "string" ? data.topic : "";
-  const file = typeof data.file === "string" ? data.file : "";
-  const path = typeof data.path === "string" ? data.path : "";
-  const samplePairs = Array.isArray(data.samplePairs) ? data.samplePairs : [];
-  const hasShape =
-    !!topic &&
-    !!file &&
-    !!path &&
-    Number.isFinite(Number(data.questionsCount)) &&
-    Number.isFinite(Number(data.answersCount));
-
-  if (!hasShape) {
+  const parsedPayload = parseCommandPayload(output);
+  if (!parsedPayload) {
     return (
       <div className="card">
         <div className="title">USMLE Practice Question</div>
@@ -791,60 +1494,111 @@ export const render = (
     );
   }
 
+  const mode = normalizeModeKey(activeMode) || DEFAULT_MODE;
+  const activeProfile = DIFFICULTY_PROFILES[mode];
+  const contexts = parsedPayload.contexts;
+  const activeContext = topicContextByMode[mode] || contexts[mode];
+  const commandWarning =
+    parsedPayload.warning ||
+    (typeof rawData.warning === "string" ? rawData.warning : null);
+
   const hasApiKey = typeof apiKey === "string" && apiKey.trim().length > 0;
 
   if (pendingCommandRefreshNonce !== null) {
-    setTimeout(() => {
-      dispatch({
-        type: "FORCE_COMMAND_REFRESH",
-        nonce: pendingCommandRefreshNonce,
-      });
-      run(command)
-        .then((refreshedOutput) => {
-          dispatch({ output: String(refreshedOutput || "") });
-        })
-        .catch((err) => {
-          dispatch({
-            error: `Refresh failed: ${String(err && err.message ? err.message : err)}`,
-          });
+    const refreshKey = String(pendingCommandRefreshNonce);
+    if (!scheduledRefreshRequests.has(refreshKey)) {
+      scheduledRefreshRequests.add(refreshKey);
+      setTimeout(() => {
+        scheduledRefreshRequests.delete(refreshKey);
+        dispatch({
+          type: "FORCE_COMMAND_REFRESH",
+          nonce: pendingCommandRefreshNonce,
         });
-    }, 0);
+        run(command)
+          .then((refreshedOutput) => {
+            dispatch({ output: String(refreshedOutput || "") });
+          })
+          .catch((err) => {
+            dispatch({
+              error: `Refresh failed: ${String(err && err.message ? err.message : err)}`,
+            });
+          });
+      }, 0);
+    }
   }
 
-  if (
-    hasApiKey &&
-    pendingGenerationTopicKey &&
-    pendingGenerationId !== null &&
-    pendingGenerationTopicKey !== lastGeneratedTopicKey
-  ) {
-    setTimeout(() => {
-      dispatch({
-        type: "GENERATION_REQUEST_SENT",
-        topicKey: pendingGenerationTopicKey,
-        generationId: pendingGenerationId,
-      });
-      generateStepQuestion(
-        {
-          apiKey: apiKey.trim(),
-          topic,
-          file,
-          path,
-          samplePairs,
-          generationId: pendingGenerationId,
-          topicKey: pendingGenerationTopicKey,
-        },
-        dispatch,
-      );
-    }, 0);
+  if (hasApiKey) {
+    for (const modeKey of QUESTION_MODES) {
+      const pending = pendingGenerationByMode[modeKey];
+      const context = topicContextByMode[modeKey] || contexts[modeKey];
+      if (!pending || !context) continue;
+
+      const requestKey = `${modeKey}::${pending.generationId}::${pending.topicKey}`;
+      if (scheduledGenerationRequests.has(requestKey)) continue;
+
+      scheduledGenerationRequests.add(requestKey);
+      setTimeout(() => {
+        scheduledGenerationRequests.delete(requestKey);
+        dispatch({
+          type: "GENERATION_REQUEST_SENT",
+          mode: modeKey,
+          topicKey: pending.topicKey,
+          generationId: pending.generationId,
+        });
+        generateStepQuestion(
+          {
+            apiKey: apiKey.trim(),
+            mode: modeKey,
+            difficultyProfile: DIFFICULTY_PROFILES[modeKey],
+            topicContext: context,
+            generationId: pending.generationId,
+            topicKey: pending.topicKey,
+          },
+          dispatch,
+        );
+      }, 0);
+    }
   }
+
+  const activeQuestion =
+    questionByMode && questionByMode[mode] ? questionByMode[mode] : null;
+  const activeLoading = !!(loadingByMode && loadingByMode[mode]);
+  const activeQuestionError =
+    errorByMode && typeof errorByMode[mode] === "string"
+      ? errorByMode[mode]
+      : null;
+  const selectedKey =
+    selectedKeyByMode && typeof selectedKeyByMode[mode] === "string"
+      ? selectedKeyByMode[mode]
+      : "";
+  const revealed = !!(revealedByMode && revealedByMode[mode]);
 
   const onRefresh = (e) => {
     e.stopPropagation();
     dispatch({ type: "REFRESH_CLICKED" });
   };
 
+  const persistQuestionRemoval = (modeKey) => {
+    const safeMode = normalizeModeKey(modeKey);
+    if (!safeMode) return;
+    const requestKey = `${safeMode}::remove`;
+    if (scheduledCacheMutationRequests.has(requestKey)) return;
+    scheduledCacheMutationRequests.add(requestKey);
+    setTimeout(() => {
+      scheduledCacheMutationRequests.delete(requestKey);
+      persistPendingQuestionForMode(
+        { mode: safeMode, cachedEntry: null },
+        dispatch,
+      );
+    }, 0);
+  };
+
   const onTopicChatGPT = (e) => {
     e.stopPropagation();
+    const topic =
+      activeContext && typeof activeContext.topic === "string"
+        ? activeContext.topic
+        : "USMLE Step 1 topic";
     const prompt = `Tell me about ${topic}. I'm studying for USMLE Step 1, so keep things relevant`;
     const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
     run(`open '${escapeForSingleQuotedShell(url)}'`);
@@ -856,16 +1610,31 @@ export const render = (
         <div className="title">USMLE Practice Question</div>
         <div className="headerBtns">
           <button
+            className={`modeBtn ${mode === "easy" ? "modeBtnActive" : ""}`}
+            onClick={() => dispatch({ type: "MODE_SELECTED", mode: "easy" })}
+            title="Easy mode"
+          >
+            {DIFFICULTY_PROFILES.easy.emoji}
+          </button>
+          <button
+            className={`modeBtn ${mode === "hard" ? "modeBtnActive" : ""}`}
+            onClick={() => dispatch({ type: "MODE_SELECTED", mode: "hard" })}
+            title="Hard mode"
+          >
+            {DIFFICULTY_PROFILES.hard.emoji}
+          </button>
+          <button
             className="refreshBtn"
             onClick={onRefresh}
-            title="Refresh topic"
+            title="Refresh topics"
           >
             🔄
           </button>
+
           <button
             className="topicChatgptBtn"
             onClick={onTopicChatGPT}
-            title="Ask GPT about topic"
+            title="Ask GPT about active topic"
           >
             💬
           </button>
@@ -873,6 +1642,8 @@ export const render = (
       </div>
 
       {apiKeyWarning ? <div className="warn">{apiKeyWarning}</div> : null}
+      {cacheWarning ? <div className="warn">{cacheWarning}</div> : null}
+      {commandWarning ? <div className="warn">{commandWarning}</div> : null}
 
       {!hasApiKey ? (
         <div className="warn">
@@ -880,22 +1651,28 @@ export const render = (
         </div>
       ) : null}
 
-      {hasApiKey && loadingQuestion ? (
-        <div className="loading">Generating Step 1 question...</div>
+      {activeLoading ? (
+        <div className="loading">
+          Generating {activeProfile.label} Step 1 question...
+        </div>
       ) : null}
 
-      {hasApiKey && !loadingQuestion && questionError ? (
-        <div className="error">{questionError}</div>
+      {!activeLoading && activeQuestionError ? (
+        <div className="error">{activeQuestionError}</div>
       ) : null}
 
-      {hasApiKey && !loadingQuestion && question ? (
+      {!activeLoading && !activeQuestion && !activeQuestionError ? (
+        <div className="loading">Question not generated yet.</div>
+      ) : null}
+
+      {!activeLoading && activeQuestion ? (
         <div className="questionWrap">
-          <div className="stem">{question.stem}</div>
+          <div className="stem">{activeQuestion.stem}</div>
           <div className="choices">
-            {question.choices.map((choice) => {
+            {activeQuestion.choices.map((choice) => {
               const key = choice.key;
               const selected = selectedKey === key;
-              const isCorrect = key === question.correctKey;
+              const isCorrect = key === activeQuestion.correctKey;
 
               const stateClass = revealed
                 ? isCorrect
@@ -905,11 +1682,24 @@ export const render = (
                   ? "choiceSelected"
                   : "";
 
+              const selectedResultClass =
+                revealed && selected
+                  ? isCorrect
+                    ? "choiceBtnSelectedCorrect"
+                    : "choiceBtnSelectedWrong"
+                  : "";
+
               return (
                 <div key={key} className={`choiceWrap ${stateClass}`}>
                   <button
-                    className="choiceBtn"
-                    onClick={() => dispatch({ type: "SELECT_ANSWER", key })}
+                    className={`choiceBtn ${selectedResultClass}`}
+                    onClick={() => {
+                      const alreadyRevealed = !!revealed;
+                      dispatch({ type: "SELECT_ANSWER", mode, key });
+                      if (!alreadyRevealed && cachedQuestionByMode[mode]) {
+                        persistQuestionRemoval(mode);
+                      }
+                    }}
                   >
                     <span className="choiceKey">{key}.</span>
                     <span className="choiceText">{choice.text}</span>
@@ -926,8 +1716,8 @@ export const render = (
 
           {revealed ? (
             <div className="correctExplain">
-              Correct answer: <strong>{question.correctKey}</strong>.{" "}
-              {question.correctExplanation}
+              Correct answer: <strong>{activeQuestion.correctKey}</strong>.{" "}
+              {activeQuestion.correctExplanation}
             </div>
           ) : null}
         </div>
@@ -976,6 +1766,7 @@ export const className = `
   }
 
   .refreshBtn,
+  .modeBtn,
   .topicChatgptBtn {
     border: 1px solid rgba(255,255,255,0.18);
     background: rgba(255,255,255,0.10);
@@ -986,10 +1777,22 @@ export const className = `
   }
 
   .refreshBtn:hover,
+  .modeBtn:hover,
   .topicChatgptBtn:hover,
   .refreshBtn:focus-visible,
+  .modeBtn:focus-visible,
   .topicChatgptBtn:focus-visible {
     background: rgba(255,255,255,0.18);
+  }
+
+  .modeBtn {
+    padding: 6px 8px;
+    min-width: 34px;
+  }
+
+  .modeBtnActive {
+    border-color: rgba(255,255,255,0.42);
+    background: rgba(255,255,255,0.26);
   }
 
   .loading {
@@ -1055,6 +1858,14 @@ export const className = `
 
   .choiceBtn:hover {
     background: rgba(255,255,255,0.08);
+  }
+
+  .choiceBtnSelectedCorrect {
+    background: rgba(90, 175, 105, 0.28);
+  }
+
+  .choiceBtnSelectedWrong {
+    background: rgba(185, 90, 90, 0.28);
   }
 
   .choiceKey {
