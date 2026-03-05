@@ -334,7 +334,8 @@ export const render = ({ output, error, refreshing }, dispatch) => {
 
   const parsed = parseCommandOutput(output);
   const selected = parsed.ok ? parsed.selected : null;
-  const title = selected && selected.topic ? selected.topic : "Empty Note Nudge";
+  const title =
+    selected && selected.topic ? selected.topic : "Empty Note Nudge";
   const notePath = selected && selected.path ? selected.path : "";
 
   const onOpen = (e) => {
@@ -382,22 +383,16 @@ export const render = ({ output, error, refreshing }, dispatch) => {
           </div>
         ) : (
           <div>
-            <div className="error">{parsed.error || "Could not load notes."}</div>
+            <div className="error">
+              {parsed.error || "Could not load notes."}
+            </div>
             {parsed.raw ? <pre className="raw">{parsed.raw}</pre> : null}
           </div>
         )
       ) : null}
 
       {!error && parsed.ok ? (
-        <div>
-          <div className="nudge">
-            This note is missing parseable Questions/Answers. Fill it in to
-            make it eligible.
-          </div>
-          <div className="meta">
-            {parsed.candidateCount} ineligible notes found.
-          </div>
-        </div>
+        <div className="meta">{parsed.candidateCount} notes remain</div>
       ) : null}
     </div>
   );
@@ -477,6 +472,7 @@ export const className = `
   }
 
   .meta {
+  text-align: center;
     margin-top: 8px;
     font-size: 12px;
     opacity: 0.72;
