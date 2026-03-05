@@ -1998,6 +1998,10 @@ export const render = (
       ? selectedKeyByMode[mode]
       : "";
   const revealed = !!(revealedByMode && revealedByMode[mode]);
+  const revealedTopicLabel =
+    activeContext && typeof activeContext.topic === "string"
+      ? activeContext.topic.trim()
+      : "";
 
   const onRefresh = (e) => {
     e.stopPropagation();
@@ -2173,7 +2177,10 @@ export const render = (
 
       {!activeLoading && activeQuestion ? (
         <div className="questionWrap">
-          <div className="stem">{activeQuestion.stem}</div>
+          <div className="stem">
+            {activeQuestion.stem}
+            {revealed && revealedTopicLabel ? ` [${revealedTopicLabel}]` : ""}
+          </div>
           <div className="choices">
             {activeQuestion.choices.map((choice) => {
               const key = choice.key;

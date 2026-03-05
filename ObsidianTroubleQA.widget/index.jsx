@@ -124,6 +124,179 @@ const pickVisibleItems = (items, lastShownIds) => {
   return chosen;
 };
 
+const escapeHtml = (text) =>
+  String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const sanitizeMarkdownLink = (href) => {
+  if (typeof href !== "string") return "";
+  const trimmed = href.trim();
+  if (!trimmed) return "";
+  if (!/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(trimmed)) return "";
+
+  try {
+    const parsed = new URL(trimmed);
+    const protocol = String(parsed.protocol || "").toLowerCase();
+    if (
+      protocol === "http:" ||
+      protocol === "https:" ||
+      protocol === "mailto:"
+    ) {
+      return parsed.href;
+    }
+    return "";
+  } catch {
+    return "";
+  }
+};
+
+const renderInlineMarkdown = (input) => {
+  if (typeof input !== "string" || !input) return "";
+
+  const codeTokens = [];
+  let html = String(input).replace(/`([^`\n]+?)`/g, (_, code) => {
+    const token = `\u0000CODE${codeTokens.length}\u0000`;
+    codeTokens.push(`<code>${escapeHtml(code)}</code>`);
+    return token;
+  });
+
+  html = escapeHtml(html);
+
+  html = html.replace(
+    /\[([^\]\n]+)\]\(([^)\n]+)\)/g,
+    (_, labelText, linkTarget) => {
+      const safeHref = sanitizeMarkdownLink(linkTarget);
+      const label = String(labelText || "");
+      if (!safeHref) return label;
+      return `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    },
+  );
+
+  html = html.replace(/\*\*([^*\n][\s\S]*?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+
+  html = html.replace(/\u0000CODE(\d+)\u0000/g, (_, idxText) => {
+    const idx = Number(idxText);
+    return Number.isInteger(idx) && codeTokens[idx] ? codeTokens[idx] : "";
+  });
+
+  return html;
+};
+
+const renderMarkdownToHtml = (input) => {
+  if (typeof input !== "string" || !input.trim()) return "";
+
+  try {
+    const lines = input.replace(/\r\n/g, "\n").split("\n");
+    const blocks = [];
+    let paragraph = [];
+    let listType = "";
+    let listItems = [];
+    let inCodeBlock = false;
+    let codeLines = [];
+
+    const flushParagraph = () => {
+      if (paragraph.length === 0) return;
+      const text = paragraph.join("\n").trim();
+      paragraph = [];
+      if (!text) return;
+      blocks.push(`<p>${renderInlineMarkdown(text).replace(/\n/g, "<br />")}</p>`);
+    };
+
+    const flushList = () => {
+      if (!listType || listItems.length === 0) {
+        listType = "";
+        listItems = [];
+        return;
+      }
+      const tag = listType === "ol" ? "ol" : "ul";
+      const itemsHtml = listItems
+        .map((item) => `<li>${renderInlineMarkdown(item)}</li>`)
+        .join("");
+      blocks.push(`<${tag}>${itemsHtml}</${tag}>`);
+      listType = "";
+      listItems = [];
+    };
+
+    const flushCodeBlock = () => {
+      if (!inCodeBlock) return;
+      blocks.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+      inCodeBlock = false;
+      codeLines = [];
+    };
+
+    for (const rawLine of lines) {
+      const line = String(rawLine || "");
+
+      if (inCodeBlock) {
+        if (/^\s*```/.test(line)) {
+          flushCodeBlock();
+        } else {
+          codeLines.push(line);
+        }
+        continue;
+      }
+
+      if (/^\s*```/.test(line)) {
+        flushParagraph();
+        flushList();
+        inCodeBlock = true;
+        codeLines = [];
+        continue;
+      }
+
+      if (!line.trim()) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      const headingMatch = line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+      if (headingMatch) {
+        flushParagraph();
+        flushList();
+        const level = headingMatch[1].length;
+        const text = headingMatch[2];
+        blocks.push(`<h${level}>${renderInlineMarkdown(text)}</h${level}>`);
+        continue;
+      }
+
+      const orderedMatch = line.match(/^\s*\d+\.\s+(.+?)\s*$/);
+      if (orderedMatch) {
+        flushParagraph();
+        if (listType && listType !== "ol") flushList();
+        listType = "ol";
+        listItems.push(orderedMatch[1]);
+        continue;
+      }
+
+      const unorderedMatch = line.match(/^\s*[-*+]\s+(.+?)\s*$/);
+      if (unorderedMatch) {
+        flushParagraph();
+        if (listType && listType !== "ul") flushList();
+        listType = "ul";
+        listItems.push(unorderedMatch[1]);
+        continue;
+      }
+
+      flushList();
+      paragraph.push(line.trim());
+    }
+
+    flushParagraph();
+    flushList();
+    flushCodeBlock();
+
+    return blocks.join("") || escapeHtml(input).replace(/\n/g, "<br />");
+  } catch {
+    return escapeHtml(input).replace(/\n/g, "<br />");
+  }
+};
+
 const removeTroubleItem = (id, dispatch) => {
   const nodeScript = `
 const fs = require("fs");
@@ -438,7 +611,12 @@ export const render = (
                 </div>
 
                 {isOpen && answer ? (
-                  <div className="answer">{answer}</div>
+                  <div
+                    className="answer markdown"
+                    dangerouslySetInnerHTML={{
+                      __html: renderMarkdownToHtml(answer),
+                    }}
+                  />
                 ) : null}
               </div>
             );
@@ -578,7 +756,77 @@ export const className = `
     font-size: 14px;
     opacity: 0.9;
     border-top: 1px solid rgba(255,255,255,0.1);
-    white-space: pre-wrap;
+    line-height: 1.45;
+  }
+
+  .answer.markdown p {
+    margin: 0 0 8px;
+  }
+
+  .answer.markdown p:last-child {
+    margin-bottom: 0;
+  }
+
+  .answer.markdown h1,
+  .answer.markdown h2,
+  .answer.markdown h3,
+  .answer.markdown h4,
+  .answer.markdown h5,
+  .answer.markdown h6 {
+    margin: 0 0 8px;
+    font-weight: 650;
+    line-height: 1.3;
+  }
+
+  .answer.markdown h1 { font-size: 18px; }
+  .answer.markdown h2 { font-size: 17px; }
+  .answer.markdown h3 { font-size: 16px; }
+  .answer.markdown h4,
+  .answer.markdown h5,
+  .answer.markdown h6 { font-size: 15px; }
+
+  .answer.markdown ul,
+  .answer.markdown ol {
+    margin: 0 0 8px 18px;
+    padding: 0;
+  }
+
+  .answer.markdown li {
+    margin: 0 0 4px;
+  }
+
+  .answer.markdown li:last-child {
+    margin-bottom: 0;
+  }
+
+  .answer.markdown code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.92em;
+    background: rgba(255,255,255,0.14);
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+
+  .answer.markdown pre {
+    margin: 0 0 10px;
+    padding: 10px;
+    border-radius: 10px;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(255,255,255,0.1);
+    overflow-x: auto;
+  }
+
+  .answer.markdown pre code {
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+    font-size: 0.9em;
+    white-space: pre;
+  }
+
+  .answer.markdown a {
+    color: rgba(150, 210, 255, 0.98);
+    text-decoration: underline;
   }
 
   .error {
