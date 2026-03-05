@@ -2093,7 +2093,45 @@ export const render = (
       activeContext && typeof activeContext.topic === "string"
         ? activeContext.topic
         : "USMLE Step 1 topic";
-    const prompt = `Tell me about ${topic}. I'm studying for USMLE Step 1, so keep things relevant`;
+    const questionObject =
+      activeQuestion && typeof activeQuestion === "object" ? activeQuestion : null;
+    const stem =
+      questionObject && typeof questionObject.stem === "string"
+        ? questionObject.stem.trim()
+        : "";
+    const correctKey = normalizeChoiceKey(
+      questionObject && typeof questionObject.correctKey === "string"
+        ? questionObject.correctKey
+        : "",
+    );
+    const choices =
+      questionObject &&
+      Array.isArray(questionObject.choices)
+        ? questionObject.choices
+        : [];
+    const correctChoice = choices.find((choice) => {
+      if (!choice || typeof choice !== "object") return false;
+      return normalizeChoiceKey(choice.key) === correctKey;
+    });
+    const correctChoiceText =
+      correctChoice && typeof correctChoice.text === "string"
+        ? correctChoice.text.trim()
+        : "";
+    const correctExplanation =
+      questionObject && typeof questionObject.correctExplanation === "string"
+        ? questionObject.correctExplanation.trim()
+        : "";
+
+    const hasQuestionContext = !!(stem || correctKey || correctExplanation);
+    const prompt = hasQuestionContext
+      ? [
+          `Topic: ${topic}`,
+          `Question: ${stem || "Unavailable"}`,
+          `Correct Answer: ${correctKey || "Unavailable"}. ${correctChoiceText || "Unavailable"}`,
+          `Official Explanation: ${correctExplanation || "Unavailable"}`,
+          "Request: Explain this in more detail assuming I know nothing. Start from first principles, define every important term, walk through why the correct answer is right, and explain common traps that make the wrong answers tempting.",
+        ].join("\n\n")
+      : `Tell me about ${topic}. I'm studying for USMLE Step 1. Assume I know nothing, start from first principles, define key terms, and explain clearly with beginner-friendly detail.`;
     const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
     run(`open '${escapeForSingleQuotedShell(url)}'`);
   };
