@@ -1,6 +1,6 @@
 import { run } from "uebersicht";
 
-export const refreshFrequency = 1000 * 60 * 30; // 30 minutes
+export const refreshFrequency = 1000 * 60 * 15; // 15 minutes
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 
 const NOTES_DIR =
@@ -9,6 +9,9 @@ const NOTES_DIR =
 const TROUBLE_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";
 
+const LAST_NOTE_STORE =
+  "/tmp/obsidianqa-last-note-selection.json";
+
 // ===================== DATA FETCH =====================
 export const command = `
 "${NODE}" <<'EOF'
@@ -16,6 +19,7 @@ const fs = require("fs");
 const path = require("path");
 
 const NOTES_DIR = ${JSON.stringify(NOTES_DIR)};
+const LAST_NOTE_STORE = ${JSON.stringify(LAST_NOTE_STORE)};
 
 function walk(dir) {
   const results = [];
@@ -71,6 +75,36 @@ function splitNumberedList(sectionText) {
   return items;
 }
 
+function readPreviousSelection() {
+  if (!fs.existsSync(LAST_NOTE_STORE)) return "";
+  let raw = "";
+  try {
+    raw = fs.readFileSync(LAST_NOTE_STORE, "utf8");
+  } catch {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed.lastNotePath === "string"
+      ? parsed.lastNotePath
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSelection(pathValue) {
+  try {
+    fs.writeFileSync(
+      LAST_NOTE_STORE,
+      JSON.stringify({ lastNotePath: String(pathValue || "") }) + "\\n",
+      "utf8",
+    );
+  } catch {
+    // Best effort only; selection should still render if this fails.
+  }
+}
+
 function main() {
   if (!fs.existsSync(NOTES_DIR)) {
     console.log(JSON.stringify({ error: "Notes directory not found: " + NOTES_DIR }));
@@ -83,6 +117,7 @@ function main() {
     return;
   }
 
+  const candidates = [];
   for (const file of files) {
     let text;
     try { text = fs.readFileSync(file, "utf8"); }
@@ -100,17 +135,38 @@ function main() {
     if (qs.length !== as.length) continue;
 
     const pairs = qs.map((q, i) => ({ q, a: as[i] }));
-
-    console.log(JSON.stringify({
+    candidates.push({
       file: path.basename(file),
       path: file,
-      pairs
+      pairs,
+    });
+  }
+
+  if (!candidates.length) {
+    console.log(JSON.stringify({
+      error: "No notes found with parseable numbered Questions/Answers of equal length."
     }));
     return;
   }
 
+  const previousPath = readPreviousSelection();
+  const filteredCandidates = previousPath
+    ? candidates.filter((item) => item.path !== previousPath)
+    : candidates;
+  const selectionPool =
+    filteredCandidates.length > 0 ? filteredCandidates : candidates;
+  const selected =
+    selectionPool[Math.floor(Math.random() * selectionPool.length)];
+
+  writeSelection(selected.path);
+
   console.log(JSON.stringify({
-    error: "No notes found with parseable numbered Questions/Answers of equal length."
+    file: selected.file,
+    path: selected.path,
+    pairs: selected.pairs,
+    selectedAt: new Date().toISOString(),
+    selectionPoolSize: selectionPool.length,
+    prevNotePathUsed: !!previousPath && filteredCandidates.length > 0
   }));
 }
 
@@ -656,6 +712,10 @@ export const initialState = {
   visibleIds: [],
   syncingStore: false,
   syncedKey: "",
+  lastNotePath: "",
+  lastRefreshLabel: "",
+  lastSelectionPoolSize: 0,
+  lastPrevNotePathUsed: false,
 };
 
 export const updateState = (event, prev) => {
@@ -733,6 +793,10 @@ export const updateState = (event, prev) => {
   if (event && typeof event.output === "string") {
     const parsed = parseOutputData(event.output);
     const nextVisible = [];
+    let nextLastNotePath = prev.lastNotePath;
+    let nextLastRefreshLabel = "";
+    let nextLastSelectionPoolSize = 0;
+    let nextLastPrevNotePathUsed = false;
 
     if (parsed && !parsed.error && Array.isArray(parsed.pairs)) {
       const notePath = typeof parsed.path === "string" ? parsed.path : "";
@@ -740,6 +804,26 @@ export const updateState = (event, prev) => {
         if (!pair || typeof pair.q !== "string") continue;
         nextVisible.push(makeItemId(notePath, pair.q));
       }
+      if (notePath) nextLastNotePath = notePath;
+
+      if (typeof parsed.selectedAt === "string") {
+        const parsedDate = new Date(parsed.selectedAt);
+        if (!Number.isNaN(parsedDate.getTime())) {
+          nextLastRefreshLabel = parsedDate.toLocaleTimeString([], {
+            hour: "numeric",
+            minute: "2-digit",
+          });
+        }
+      }
+
+      if (
+        Number.isFinite(parsed.selectionPoolSize) &&
+        parsed.selectionPoolSize > 0
+      ) {
+        nextLastSelectionPoolSize = Math.floor(parsed.selectionPoolSize);
+      }
+
+      nextLastPrevNotePathUsed = !!parsed.prevNotePathUsed;
     }
 
     return {
@@ -752,6 +836,10 @@ export const updateState = (event, prev) => {
       visibleIds: nextVisible,
       syncingStore: false,
       syncedKey: "",
+      lastNotePath: nextLastNotePath,
+      lastRefreshLabel: nextLastRefreshLabel,
+      lastSelectionPoolSize: nextLastSelectionPoolSize,
+      lastPrevNotePathUsed: nextLastPrevNotePathUsed,
     };
   }
 
@@ -770,6 +858,9 @@ export const render = (
     visibleIds,
     syncingStore,
     syncedKey,
+    lastRefreshLabel,
+    lastSelectionPoolSize,
+    lastPrevNotePathUsed,
   },
   dispatch,
 ) => {
@@ -927,6 +1018,14 @@ export const render = (
           );
         })}
       </div>
+
+      {lastRefreshLabel ? (
+        <div className="meta">
+          Last refresh: {lastRefreshLabel}
+          {lastSelectionPoolSize > 0 ? ` • pool: ${lastSelectionPoolSize}` : ""}
+          {lastPrevNotePathUsed ? " • no-repeat applied" : ""}
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -1009,6 +1108,12 @@ export const className = `
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .meta {
+    margin-top: 10px;
+    font-size: 12px;
+    opacity: 0.68;
   }
 
   .item {
