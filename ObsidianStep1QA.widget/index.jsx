@@ -2002,6 +2002,14 @@ export const render = (
     activeContext && typeof activeContext.topic === "string"
       ? activeContext.topic.trim()
       : "";
+  const revealedTopicPath =
+    activeContext && typeof activeContext.path === "string"
+      ? activeContext.path.trim()
+      : "";
+  const revealedTopicUrl =
+    revealedTopicPath && /\.md$/i.test(revealedTopicPath)
+      ? `obsidian://open?path=${encodeURIComponent(revealedTopicPath)}`
+      : "obsidian://open";
 
   const onRefresh = (e) => {
     e.stopPropagation();
@@ -2088,6 +2096,11 @@ export const render = (
     const prompt = `Tell me about ${topic}. I'm studying for USMLE Step 1, so keep things relevant`;
     const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
     run(`open '${escapeForSingleQuotedShell(url)}'`);
+  };
+
+  const onOpenRevealedTopic = (e) => {
+    e.stopPropagation();
+    run(`open '${escapeForSingleQuotedShell(revealedTopicUrl)}'`);
   };
 
   const getModeButtonClassName = (modeKey) => {
@@ -2179,7 +2192,15 @@ export const render = (
         <div className="questionWrap">
           <div className="stem">
             {activeQuestion.stem}
-            {revealed && revealedTopicLabel ? ` [${revealedTopicLabel}]` : ""}
+            {revealed && revealedTopicLabel ? (
+              <>
+                {" ["}
+                <button className="stemTopicLink" onClick={onOpenRevealedTopic}>
+                  {revealedTopicLabel}
+                </button>
+                {"]"}
+              </>
+            ) : null}
           </div>
           <div className="choices">
             {activeQuestion.choices.map((choice) => {
@@ -2391,6 +2412,27 @@ export const className = `
     font-size: 14px;
     line-height: 1.4;
     white-space: pre-wrap;
+  }
+
+  .stemTopicLink {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+    opacity: 0.92;
+  }
+
+  .stemTopicLink:hover,
+  .stemTopicLink:focus-visible {
+    opacity: 1;
   }
 
   .choices {
