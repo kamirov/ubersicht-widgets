@@ -2193,13 +2193,13 @@ export const render = (
           <div className="stem">
             {activeQuestion.stem}
             {revealed && revealedTopicLabel ? (
-              <>
+              <span>
                 {" ["}
                 <button className="stemTopicLink" onClick={onOpenRevealedTopic}>
                   {revealedTopicLabel}
                 </button>
                 {"]"}
-              </>
+              </span>
             ) : null}
           </div>
           <div className="choices">
