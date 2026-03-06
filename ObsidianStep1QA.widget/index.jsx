@@ -461,50 +461,83 @@ const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
     ? contextData.samplePairs.slice(0, 3)
     : [];
 
-  // const sourceContext = cleanedPairs
-  //   .map((pair, idx) => {
-  //     const q = pair && typeof pair.q === "string" ? pair.q.trim() : "";
-  //     const a = pair && typeof pair.a === "string" ? pair.a.trim() : "";
-  //     return `${idx + 1}. Q: ${q}\nA: ${a}`;
-  //   })
-  //   .join("\n\n");
-
   const systemMessage =
     "You create rigorous USMLE Step 1 single-best-answer questions. Return only valid JSON.";
 
-  const userMessage = [
-    `Difficulty mode: ${promptMode.toUpperCase()}`,
-    `Topic: ${contextData.topic}`,
-    // `Source file: ${contextData.file || "Unknown file"}`,
-    // `Source path: ${contextData.path || "Unknown path"}`,
-    // "Use this source context to design one clinically relevant Step 1 question:",
-    // sourceContext || "(No source Q/A snippets available)",
-    "",
-    "Return JSON with this exact shape:",
-    "{",
-    '  "stem": "string",',
-    '  "choices": [',
-    '    { "key": "A", "text": "string", "explanation": "string" },',
-    '    { "key": "B", "text": "string", "explanation": "string" },',
-    '    { "key": "C", "text": "string", "explanation": "string" },',
-    '    { "key": "D", "text": "string", "explanation": "string" },',
-    '    { "key": "E", "text": "string", "explanation": "string" }',
-    "  ],",
-    '  "correctKey": "A|B|C|D|E",',
-    '  "correctExplanation": "string"',
-    "}",
-    "",
-    "Rules:",
-    "- Exactly five choices A-E.",
-    "- Exactly one correct answer.",
-    "- Vary terminology and phrasing; do not copy source wording verbatim.",
-    "- Keep stems less cue-heavy and avoid obvious giveaway language.",
-    "- Build plausible distractors that force discrimination between close concepts.",
-    "- Keep explanations concise, specific, and mechanistic.",
-    `- ${profile.difficultyInstruction}`,
-    "- The correct answer may be any key A-E; do not bias toward one position.",
-    "- Do not include markdown fences or extra text outside JSON.",
-  ].join("\n");
+  const userMessage = `Difficulty mode: ${promptMode.toUpperCase()}
+Topic: ${contextData.topic}
+
+You are generating a single USMLE Step 1-style multiple-choice question.
+
+The item should resemble the style of Step 1: clinically grounded when appropriate, mechanism-focused, and designed to test applied understanding rather than simple recall.
+
+Return JSON with this exact shape:
+{
+  "stem": "string",
+  "choices": [
+    { "key": "A", "text": "string", "explanation": "string" },
+    { "key": "B", "text": "string", "explanation": "string" },
+    { "key": "C", "text": "string", "explanation": "string" },
+    { "key": "D", "text": "string", "explanation": "string" },
+    { "key": "E", "text": "string", "explanation": "string" }
+  ],
+  "correctKey": "A|B|C|D|E",
+  "correctExplanation": "string"
+}
+
+Rules:
+- Exactly five choices A-E.
+- Exactly one correct answer.
+- Output valid JSON only.
+- Do not include markdown fences or extra text outside JSON.
+- Escape quotation marks correctly so the output is valid JSON.
+
+Step 1 style requirements:
+- Prefer a clinical vignette when the topic supports it.
+- Use patient age, sex, presentation, relevant history, physical exam, labs, imaging, pathology, or pharmacology only when they meaningfully contribute to reasoning.
+- The question should require connecting at least 2 concepts when possible, such as presentation -> mechanism, drug -> adverse effect, mutation -> pathway, pathology -> physiology, organism -> virulence factor, or lab finding -> diagnosis.
+- Focus on mechanisms, pathophysiology, pharmacology, microbiology, immunology, genetics, biochemistry, physiology, and pathology in an integrated way.
+- Avoid pure trivia and avoid asking for isolated fact recall unless the item is intentionally easy.
+- Avoid buzzword stacking and avoid making the diagnosis or answer too obvious from a single clue.
+- Do not write stems that simply ask for a definition unless difficulty mode is easy.
+- Internally decide what the question is primarily testing: mechanism, diagnosis, pathology, pharmacology, microbiology, immunology, genetics, physiology, or biochemistry, and keep the item tightly focused on that.
+
+Stem quality requirements:
+- Make the stem concise but information-dense.
+- Include enough information to discriminate among close answer choices.
+- Keep the stem less cue-heavy and avoid obvious giveaway language.
+- Use natural Step-style phrasing such as asking for the most likely mechanism, enzyme, receptor, mediator, organism feature, pathologic change, or downstream consequence.
+- Do not use negative phrasing like EXCEPT or NOT.
+- Avoid vague stems where multiple answers could be arguably correct.
+- The stem must contain at least one discriminating clue that rules out the strongest distractor.
+
+Choice quality requirements:
+- All answer choices must belong to the same conceptual category whenever possible.
+- Distractors must be plausible and closely related to the correct answer.
+- Wrong answers should reflect common confusions, adjacent mechanisms, similar diseases, related organisms, nearby pathways, or drugs with overlapping uses or effects.
+- Do not include obviously wrong answers, joke answers, or choices whose wording or length gives away the correct answer.
+- The correct answer may be any key A-E; do not bias toward one position.
+
+Explanation requirements:
+- "correctExplanation" should briefly explain why the correct answer is right, referencing the key discriminating clues and the underlying mechanism.
+- Each choice "explanation" should briefly explain why that option is wrong in this vignette or why it is less likely than the correct answer.
+- Keep explanations concise, specific, high-yield, and mechanistic.
+- Do not merely restate the answer choice.
+
+Topic-specific content guidance:
+- When appropriate, ask about mechanism of action, adverse effect, resistance mechanism, toxin effect, virulence factor, signaling pathway, enzyme deficiency, inheritance pattern, histologic finding, receptor effect, compensatory physiologic response, or biochemical consequence.
+
+Difficulty requirements:
+- Difficulty mode will be either EASY or HARD.
+- Easy: use clearer clues, a shorter reasoning chain, and more direct concept integration, but still make it feel like a real Step 1 prep item rather than a trivia question.
+- Hard: require multi-step reasoning, use fewer giveaway clues, and make distractors more similar and more tempting.
+- ${profile.difficultyInstruction}
+
+Quality control before finalizing:
+- Ensure only one answer is unambiguously correct.
+- Ensure the vignette supports the correct answer better than any distractor.
+- Ensure the item feels like a Step 1 preparation question rather than a basic classroom quiz.
+- Ensure the answer can be solved from the information in the stem plus standard foundational medical knowledge.`;
 
   return { systemMessage, userMessage };
 };
@@ -2094,7 +2127,9 @@ export const render = (
         ? activeContext.topic
         : "USMLE Step 1 topic";
     const questionObject =
-      activeQuestion && typeof activeQuestion === "object" ? activeQuestion : null;
+      activeQuestion && typeof activeQuestion === "object"
+        ? activeQuestion
+        : null;
     const stem =
       questionObject && typeof questionObject.stem === "string"
         ? questionObject.stem.trim()
@@ -2105,8 +2140,7 @@ export const render = (
         : "",
     );
     const choices =
-      questionObject &&
-      Array.isArray(questionObject.choices)
+      questionObject && Array.isArray(questionObject.choices)
         ? questionObject.choices
         : [];
     const correctChoice = choices.find((choice) => {
