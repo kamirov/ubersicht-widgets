@@ -402,7 +402,7 @@ export const className = `
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
-  width: 560px;
+  width: 460px;
 
   font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   color: rgba(255,255,255,0.92);
