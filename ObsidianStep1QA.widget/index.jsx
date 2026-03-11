@@ -142,7 +142,11 @@ function main() {
   ).size;
   const warning =
     distinctPathCount < 3
-      ? `Only found ${distinctPathCount} distinct parseable note topic${distinctPathCount === 1 ? "" : "s"}; reusing topic context across easy, medium, and hard modes.`
+      ? "Only found " +
+        String(distinctPathCount) +
+        " distinct parseable note topic" +
+        (distinctPathCount === 1 ? "" : "s") +
+        "; reusing topic context across easy, medium, and hard modes."
       : null;
 
   console.log(
@@ -768,7 +772,16 @@ const extractResponseText = (data) => {
   return fragments.join("\n").trim();
 };
 
-const emptyCachedByMode = () => ({ targeted: null, easy: null, hard: null });
+const emptyCachedByMode = () => makeModeMap(() => null);
+
+const resolveCachedDifficulty = ({ mode, entry, version }) => {
+  const explicitDifficulty = normalizeDifficultyKey(entry && entry.difficulty);
+  if (explicitDifficulty) return explicitDifficulty;
+  if (Number(version) === 1) {
+    return normalizeDifficultyKey(LEGACY_CACHED_DIFFICULTY_BY_MODE[mode]);
+  }
+  return "";
+};
 
 const parsePendingQuestionsStore = (rawOutput) => {
   let parsed;
@@ -782,7 +795,12 @@ const parsePendingQuestionsStore = (rawOutput) => {
     };
   }
 
-  if (!parsed || typeof parsed !== "object" || Number(parsed.version) !== 1) {
+  const version = Number(parsed && parsed.version);
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    ![1, CURRENT_PENDING_QUESTIONS_VERSION].includes(version)
+  ) {
     return {
       cachedQuestionByMode: emptyCachedByMode(),
       warning:
@@ -818,12 +836,16 @@ const parsePendingQuestionsStore = (rawOutput) => {
       typeof entry.savedAt === "string" && entry.savedAt.trim()
         ? entry.savedAt.trim()
         : "";
+    const difficulty = resolveCachedDifficulty({ mode, entry, version });
+    const expectedDifficulty = getDifficultyForMode(mode);
 
     if (
       !normalized.question ||
       !topicContext ||
       !savedAt ||
-      !Number.isFinite(Date.parse(savedAt))
+      !Number.isFinite(Date.parse(savedAt)) ||
+      !difficulty ||
+      difficulty !== expectedDifficulty
     ) {
       invalidModes.push(mode);
       continue;
@@ -833,6 +855,7 @@ const parsePendingQuestionsStore = (rawOutput) => {
       question: normalized.question,
       topicContext,
       savedAt,
+      difficulty,
     };
   }
 
@@ -948,10 +971,7 @@ function main() {
     console.log(JSON.stringify({
       ok: true,
       exists: false,
-      raw: JSON.stringify({
-        version: 1,
-        questions: { targeted: null, easy: null, hard: null },
-      }),
+      raw: ${JSON.stringify(JSON.stringify(EMPTY_PENDING_QUESTION_STORE))},
       warning: null,
     }));
     return;
@@ -1028,6 +1048,7 @@ const persistPendingQuestionForMode = ({ mode, cachedEntry }, dispatch) => {
 
   const payload = cachedEntry
     ? {
+        difficulty: getDifficultyForMode(safeMode),
         question: cachedEntry.question,
         topicContext: cachedEntry.topicContext,
         savedAt:
@@ -1044,10 +1065,48 @@ const path = require("path");
 const STORE = '${escapeForSingleQuotedShell(PENDING_QUESTIONS_STORE)}';
 const MODE = ${JSON.stringify(safeMode)};
 const ENTRY = ${JSON.stringify(payload)};
+const EMPTY_STORE = ${JSON.stringify(EMPTY_PENDING_QUESTION_STORE)};
+const CURRENT_VERSION = ${JSON.stringify(CURRENT_PENDING_QUESTIONS_VERSION)};
+const EXPECTED_DIFFICULTY_BY_MODE = ${JSON.stringify({
+    targeted: getDifficultyForMode("targeted"),
+    easy: getDifficultyForMode("easy"),
+    medium: getDifficultyForMode("medium"),
+    hard: getDifficultyForMode("hard"),
+  })};
+const LEGACY_DIFFICULTY_BY_MODE = ${JSON.stringify(
+    LEGACY_CACHED_DIFFICULTY_BY_MODE,
+  )};
+
+function cloneEmptyStore() {
+  return JSON.parse(JSON.stringify(EMPTY_STORE));
+}
+
+function normalizeEntry(mode, entry, version) {
+  if (entry === null || typeof entry === "undefined") return null;
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+
+  const explicitDifficulty =
+    typeof entry.difficulty === "string"
+      ? entry.difficulty.trim().toLowerCase()
+      : "";
+  const legacyDifficulty =
+    Number(version) === 1
+      ? String(LEGACY_DIFFICULTY_BY_MODE[mode] || "").trim().toLowerCase()
+      : "";
+  const difficulty = explicitDifficulty || legacyDifficulty;
+  if (!difficulty || difficulty !== EXPECTED_DIFFICULTY_BY_MODE[mode]) {
+    return null;
+  }
+
+  return {
+    ...entry,
+    difficulty,
+  };
+}
 
 function readCurrentStore() {
   if (!fs.existsSync(STORE)) {
-    return { version: 1, questions: { targeted: null, easy: null, hard: null } };
+    return cloneEmptyStore();
   }
 
   try {
@@ -1056,33 +1115,26 @@ function readCurrentStore() {
     if (
       parsed &&
       typeof parsed === "object" &&
-      Number(parsed.version) === 1 &&
+      [1, CURRENT_VERSION].includes(Number(parsed.version)) &&
       parsed.questions &&
       typeof parsed.questions === "object"
     ) {
+      const version = Number(parsed.version);
       return {
-        version: 1,
+        version: CURRENT_VERSION,
         questions: {
-          targeted:
-            typeof parsed.questions.targeted === "undefined"
-              ? null
-              : parsed.questions.targeted,
-          easy:
-            typeof parsed.questions.easy === "undefined"
-              ? null
-              : parsed.questions.easy,
-          hard:
-            typeof parsed.questions.hard === "undefined"
-              ? null
-              : parsed.questions.hard,
+          targeted: normalizeEntry("targeted", parsed.questions.targeted, version),
+          easy: normalizeEntry("easy", parsed.questions.easy, version),
+          medium: normalizeEntry("medium", parsed.questions.medium, version),
+          hard: normalizeEntry("hard", parsed.questions.hard, version),
         },
       };
     }
   } catch {
-    return { version: 1, questions: { targeted: null, easy: null, hard: null } };
+    return cloneEmptyStore();
   }
 
-  return { version: 1, questions: { targeted: null, easy: null, hard: null } };
+  return cloneEmptyStore();
 }
 
 function main() {
@@ -1467,6 +1519,7 @@ const generateStepQuestion = async (
     const cachedEntry =
       randomizedQuestion && normalizedTopicContext
         ? {
+            difficulty: getDifficultyForMode(safeMode),
             question: randomizedQuestion,
             topicContext: normalizedTopicContext,
             savedAt: new Date().toISOString(),
@@ -1504,23 +1557,15 @@ const generateStepQuestion = async (
   }
 };
 
-const emptyPendingByMode = () => ({ targeted: null, easy: null, hard: null });
-const emptyContextByMode = () => ({ targeted: null, easy: null, hard: null });
-const emptyQuestionByMode = () => ({ targeted: null, easy: null, hard: null });
-const emptyErrorByMode = () => ({ targeted: null, easy: null, hard: null });
-const emptySelectedByMode = () => ({ targeted: "", easy: "", hard: "" });
-const emptyRevealedByMode = () => ({
-  targeted: false,
-  easy: false,
-  hard: false,
-});
-const emptyResultByMode = () => ({ targeted: "", easy: "", hard: "" });
-const emptyLoadingByMode = () => ({
-  targeted: false,
-  easy: false,
-  hard: false,
-});
-const emptyGenerationIdByMode = () => ({ targeted: 0, easy: 0, hard: 0 });
+const emptyPendingByMode = () => makeModeMap(() => null);
+const emptyContextByMode = () => makeModeMap(() => null);
+const emptyQuestionByMode = () => makeModeMap(() => null);
+const emptyErrorByMode = () => makeModeMap(() => null);
+const emptySelectedByMode = () => makeModeMap(() => "");
+const emptyRevealedByMode = () => makeModeMap(() => false);
+const emptyResultByMode = () => makeModeMap(() => "");
+const emptyLoadingByMode = () => makeModeMap(() => false);
+const emptyGenerationIdByMode = () => makeModeMap(() => 0);
 
 const makeTopicKey = (mode, context) => {
   const safeMode = normalizeModeKey(mode);
@@ -1532,7 +1577,12 @@ const makeTopicKey = (mode, context) => {
 
 const scheduleGenerationForContexts = (baseState, payload) => {
   const payloadContexts = payload && payload.contexts ? payload.contexts : null;
-  if (!payloadContexts || !payloadContexts.easy || !payloadContexts.hard) {
+  if (
+    !payloadContexts ||
+    !payloadContexts.easy ||
+    !payloadContexts.medium ||
+    !payloadContexts.hard
+  ) {
     return {
       ...baseState,
       topicContextByMode: emptyContextByMode(),
@@ -1556,6 +1606,7 @@ const scheduleGenerationForContexts = (baseState, payload) => {
       topicContextByMode: {
         targeted: null,
         easy: payloadContexts.easy,
+        medium: payloadContexts.medium,
         hard: payloadContexts.hard,
       },
       loadingByMode: emptyLoadingByMode(),
@@ -1577,6 +1628,7 @@ const scheduleGenerationForContexts = (baseState, payload) => {
   const contexts = {
     targeted: targetedContext,
     easy: payloadContexts.easy,
+    medium: payloadContexts.medium,
     hard: payloadContexts.hard,
   };
 
@@ -1744,6 +1796,7 @@ export const updateState = (event, prev) => {
           ? {
               targeted: event.cachedQuestionByMode.targeted || null,
               easy: event.cachedQuestionByMode.easy || null,
+              medium: event.cachedQuestionByMode.medium || null,
               hard: event.cachedQuestionByMode.hard || null,
             }
           : emptyCachedByMode(),
@@ -2369,7 +2422,7 @@ export const render = (
             onClick={() =>
               dispatch({ type: "MODE_SELECTED", mode: "targeted" })
             }
-            title="Targeted mode"
+            title="Targeted mode (medium difficulty)"
           >
             {DIFFICULTY_PROFILES.targeted.emoji}
           </button>
@@ -2379,6 +2432,13 @@ export const render = (
             title="Easy mode"
           >
             {DIFFICULTY_PROFILES.easy.emoji}
+          </button>
+          <button
+            className={getModeButtonClassName("medium")}
+            onClick={() => dispatch({ type: "MODE_SELECTED", mode: "medium" })}
+            title="Medium mode"
+          >
+            {DIFFICULTY_PROFILES.medium.emoji}
           </button>
           <button
             className={getModeButtonClassName("hard")}

@@ -32,24 +32,26 @@ Schema:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "questions": {
     "targeted": null,
     "easy": null,
+    "medium": null,
     "hard": null
   }
 }
 ```
 
-Each non-null mode stores the full question payload, topic context, and `savedAt`.
+Each non-null mode stores the full question payload, topic context, `savedAt`, and explicit `difficulty` (`easy`, `medium`, or `hard`).
 
 Behavior:
 
-- If `targeted`, `easy`, or `hard` already has an unanswered cached question, that mode is not regenerated.
+- If `targeted`, `easy`, `medium`, or `hard` already has an unanswered cached question, that mode is not regenerated.
 - New generation happens only for mode(s) missing from the cache.
 - Selecting an answer marks that mode as answered and removes it from cache.
 - This applies to both automatic refreshes and manual `🔄` refresh.
 - If cache JSON is malformed, the widget shows a warning and continues with empty-cache behavior.
+- Legacy version `1` caches are still readable. Old targeted questions are invalidated because targeted now uses medium difficulty instead of hard.
 
 ## Wrong Topic Counts
 
@@ -70,7 +72,7 @@ Schema:
 Behavior:
 
 - Selecting an incorrect answer increments that topic count by `1` (all modes).
-- Selecting a correct answer in `easy`/`hard` does not update this file.
+- Selecting a correct answer in `easy`/`medium`/`hard` does not update this file.
 - Selecting a correct answer in `targeted` decrements that topic by `1`.
 - If a `targeted` decrement reaches `0`, that topic key is deleted.
 - Missing or blank topics are counted under `"Unknown topic"`.
@@ -78,11 +80,16 @@ Behavior:
 
 ## Targeted Mode
 
-The widget includes a `🎯` targeted mode button (left of easy mode):
+The widget includes four difficulty buttons:
+
+- `🎯` targeted
+- `🥚` easy
+- `🐣` medium
+- `🐓` hard
 
 - Targeted mode chooses a topic from `wrong-topic-counts.json`.
 - Topic selection is weighted by count value (`higher count => higher chance`).
-- Targeted questions use hard-style difficulty behavior.
+- Targeted questions use medium-style difficulty behavior.
 - If there are no topics with count `> 0`, targeted mode does not generate and shows a warning.
 - Unanswered targeted questions are cached and preserved exactly like other modes.
 
