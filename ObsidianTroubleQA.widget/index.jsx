@@ -1,6 +1,6 @@
 import { run } from "uebersicht";
 
-export const refreshFrequency = 1000 * 60 * 60; // 1 hour
+export const refreshFrequency = false;
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const TROUBLE_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";
@@ -88,6 +88,67 @@ function main() {
 main();
 EOF
 `;
+
+const AUTO_REFRESH_TARGET_MINUTE = 59;
+const autoRefreshState = {
+  started: false,
+  timerId: null,
+  dispatch: null,
+};
+
+const clearAutoRefreshTimer = () => {
+  if (autoRefreshState.timerId !== null) {
+    clearTimeout(autoRefreshState.timerId);
+    autoRefreshState.timerId = null;
+  }
+};
+
+const getMillisecondsUntilNextAutoRefresh = (now = new Date()) => {
+  const next = new Date(now.getTime());
+  next.setSeconds(0, 0);
+  next.setMinutes(AUTO_REFRESH_TARGET_MINUTE);
+  if (next.getTime() <= now.getTime()) {
+    next.setHours(next.getHours() + 1);
+  }
+  return Math.max(0, next.getTime() - now.getTime());
+};
+
+const executeCommandRefresh = (dispatch) => {
+  run(command)
+    .then((refreshedOutput) => {
+      dispatch({ output: String(refreshedOutput || "") });
+    })
+    .catch((err) => {
+      dispatch({
+        error: `Refresh failed: ${String(err && err.message ? err.message : err)}`,
+      });
+    });
+};
+
+const scheduleNextAutoRefresh = () => {
+  clearAutoRefreshTimer();
+  if (typeof autoRefreshState.dispatch !== "function") return;
+
+  autoRefreshState.timerId = setTimeout(() => {
+    autoRefreshState.timerId = null;
+    executeCommandRefresh(autoRefreshState.dispatch);
+    scheduleNextAutoRefresh();
+  }, getMillisecondsUntilNextAutoRefresh());
+};
+
+const ensureAutoRefresh = (dispatch) => {
+  if (autoRefreshState.dispatch !== dispatch) {
+    autoRefreshState.dispatch = dispatch;
+    scheduleNextAutoRefresh();
+  }
+
+  if (autoRefreshState.started) return;
+
+  autoRefreshState.started = true;
+  setTimeout(() => {
+    executeCommandRefresh(dispatch);
+  }, 0);
+};
 
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
@@ -520,6 +581,8 @@ export const render = (
   { output, error, storeError, expanded, removed },
   dispatch,
 ) => {
+  ensureAutoRefresh(dispatch);
+
   if (error) {
     return (
       <div className="card">

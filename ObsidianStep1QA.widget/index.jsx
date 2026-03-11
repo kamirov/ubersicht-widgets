@@ -1,6 +1,6 @@
 import { run } from "uebersicht";
 
-export const refreshFrequency = 1000 * 60 * 30; // 30 minutes
+export const refreshFrequency = false;
 
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const NOTES_DIR =
@@ -164,6 +164,59 @@ function main() {
 main();
 EOF
 `;
+
+const AUTO_REFRESH_TARGET_MINUTE = 59;
+const autoRefreshState = {
+  started: false,
+  timerId: null,
+  dispatch: null,
+};
+
+const clearAutoRefreshTimer = () => {
+  if (autoRefreshState.timerId !== null) {
+    clearTimeout(autoRefreshState.timerId);
+    autoRefreshState.timerId = null;
+  }
+};
+
+const getMillisecondsUntilNextAutoRefresh = (now = new Date()) => {
+  const next = new Date(now.getTime());
+  next.setSeconds(0, 0);
+  next.setMinutes(AUTO_REFRESH_TARGET_MINUTE);
+  if (next.getTime() <= now.getTime()) {
+    next.setHours(next.getHours() + 1);
+  }
+  return Math.max(0, next.getTime() - now.getTime());
+};
+
+const triggerAutoRefresh = (dispatch) => {
+  dispatch({ type: "REFRESH_CLICKED" });
+};
+
+const scheduleNextAutoRefresh = () => {
+  clearAutoRefreshTimer();
+  if (typeof autoRefreshState.dispatch !== "function") return;
+
+  autoRefreshState.timerId = setTimeout(() => {
+    autoRefreshState.timerId = null;
+    triggerAutoRefresh(autoRefreshState.dispatch);
+    scheduleNextAutoRefresh();
+  }, getMillisecondsUntilNextAutoRefresh());
+};
+
+const ensureAutoRefresh = (dispatch) => {
+  if (autoRefreshState.dispatch !== dispatch) {
+    autoRefreshState.dispatch = dispatch;
+    scheduleNextAutoRefresh();
+  }
+
+  if (autoRefreshState.started) return;
+
+  autoRefreshState.started = true;
+  setTimeout(() => {
+    triggerAutoRefresh(dispatch);
+  }, 0);
+};
 
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
@@ -2123,6 +2176,8 @@ export const render = (
   },
   dispatch,
 ) => {
+  ensureAutoRefresh(dispatch);
+
   if (needsApiKeyLoad && !apiKeyLoaded && !apiKeyLoading) {
     setTimeout(() => {
       dispatch({ type: "LOAD_API_KEY_START" });
