@@ -9,8 +9,7 @@ const NOTES_DIR =
 const TROUBLE_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";
 
-const LAST_NOTE_STORE =
-  "/tmp/obsidianqa-last-note-selection.json";
+const LAST_NOTE_STORE = "/tmp/obsidianqa-last-note-selection.json";
 
 // ===================== DATA FETCH =====================
 export const command = `
@@ -335,7 +334,9 @@ const renderMarkdownToHtml = (input) => {
       const text = paragraph.join("\n").trim();
       paragraph = [];
       if (!text) return;
-      blocks.push(`<p>${renderInlineMarkdown(text).replace(/\n/g, "<br />")}</p>`);
+      blocks.push(
+        `<p>${renderInlineMarkdown(text).replace(/\n/g, "<br />")}</p>`,
+      );
     };
 
     const flushList = () => {
@@ -355,7 +356,9 @@ const renderMarkdownToHtml = (input) => {
 
     const flushCodeBlock = () => {
       if (!inCodeBlock) return;
-      blocks.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+      blocks.push(
+        `<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`,
+      );
       inCodeBlock = false;
       codeLines = [];
     };
@@ -1018,14 +1021,6 @@ export const render = (
           );
         })}
       </div>
-
-      {lastRefreshLabel ? (
-        <div className="meta">
-          Last refresh: {lastRefreshLabel}
-          {lastSelectionPoolSize > 0 ? ` • pool: ${lastSelectionPoolSize}` : ""}
-          {lastPrevNotePathUsed ? " • no-repeat applied" : ""}
-        </div>
-      ) : null}
     </div>
   );
 };

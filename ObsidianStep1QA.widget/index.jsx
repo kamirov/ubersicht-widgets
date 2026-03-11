@@ -116,32 +116,43 @@ function main() {
     });
   }
 
-  if (candidates.length < 2) {
+  if (!candidates.length) {
     console.log(JSON.stringify({
       error:
-        "Need at least two parseable note files with numbered Questions/Answers to generate easy and hard modes.",
+        "Need at least one parseable note file with numbered Questions/Answers to generate question modes.",
     }));
     return;
   }
 
   shuffle(candidates);
   const easy = candidates[0];
-  const hard = candidates.find((candidate) => candidate.path !== easy.path);
-
-  if (!hard) {
-    console.log(JSON.stringify({
-      error:
-        "Could not pick two distinct note topics by path for easy and hard question generation.",
-    }));
-    return;
-  }
+  const medium =
+    candidates.find((candidate) => candidate.path !== easy.path) || easy;
+  const hard =
+    candidates.find(
+      (candidate) =>
+        candidate.path !== easy.path && candidate.path !== medium.path,
+    ) ||
+    candidates.find((candidate) => candidate.path !== medium.path) ||
+    candidates.find((candidate) => candidate.path !== easy.path) ||
+    medium ||
+    easy;
+  const distinctPathCount = new Set(
+    [easy.path, medium.path, hard.path].filter(Boolean),
+  ).size;
+  const warning =
+    distinctPathCount < 3
+      ? `Only found ${distinctPathCount} distinct parseable note topic${distinctPathCount === 1 ? "" : "s"}; reusing topic context across easy, medium, and hard modes.`
+      : null;
 
   console.log(
     JSON.stringify({
       contexts: [
         { mode: "easy", ...easy },
+        { mode: "medium", ...medium },
         { mode: "hard", ...hard },
       ],
+      warning,
     }),
   );
 }
@@ -153,32 +164,148 @@ EOF
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
 
-const QUESTION_MODES = ["targeted", "easy", "hard"];
+const QUESTION_MODES = ["targeted", "easy", "medium", "hard"];
+const QUESTION_DIFFICULTIES = ["easy", "medium", "hard"];
 const CHOICE_KEYS = ["A", "B", "C", "D", "E"];
 const DEFAULT_MODE = "easy";
+const CURRENT_PENDING_QUESTIONS_VERSION = 2;
+const LEGACY_CACHED_DIFFICULTY_BY_MODE = {
+  targeted: "hard",
+  easy: "easy",
+  medium: "medium",
+  hard: "hard",
+};
+const EMPTY_PENDING_QUESTION_STORE = {
+  version: CURRENT_PENDING_QUESTIONS_VERSION,
+  questions: {
+    targeted: null,
+    easy: null,
+    medium: null,
+    hard: null,
+  },
+};
+
+const DIFFICULTY_PROMPT_BLOCKS = {
+  easy: `Easy
+- Purpose: Test recognition of a single high-yield concept with minimal ambiguity.
+- Reasoning depth: 1 reasoning step.
+- Concept scope: Single concept or tightly linked pair of concepts.
+- Stem characteristics:
+  - Short vignette (2-5 sentences)
+  - Clear, classic presentation
+  - Minimal irrelevant information
+  - Usually contains a recognizable pattern or classic description
+  - Little to no diagnostic ambiguity
+- Cognitive operations:
+  - Recognition
+  - Direct recall
+  - Simple application of a known mechanism
+- Typical question targets:
+  - Identify a disease from a classic presentation
+  - Match drug to mechanism
+  - Identify enzyme deficiency
+  - Recognize inheritance pattern
+  - Identify classic histologic finding
+  - Predict a basic physiologic change
+- Distractor style:
+  - Clearly incorrect alternatives
+  - Distractors often from different conceptual categories
+  - Limited similarity to correct answer
+- Integration level: Minimal cross-system integration.
+- Data interpretation: Minimal or none.`,
+  medium: `Medium
+- Purpose: Test applied understanding requiring interpretation and moderate integration.
+- Reasoning depth: 2 reasoning steps.
+- Concept scope: One primary concept plus one secondary linked concept.
+- Stem characteristics:
+  - Moderate vignette length (4-8 sentences)
+  - Multiple findings that must be synthesized
+  - Some irrelevant or competing details
+  - Requires distinguishing between similar possibilities
+- Cognitive operations:
+  - Interpretation
+  - Mechanism identification
+  - Differentiation between related conditions
+  - Applying knowledge to a clinical context
+- Typical question targets:
+  - Determine underlying mechanism of symptoms
+  - Interpret lab patterns
+  - Distinguish between similar diseases
+  - Predict physiologic responses
+  - Identify drug adverse effects
+  - Infer mutation/pathway from clinical clues
+- Distractor style:
+  - Plausible alternatives
+  - Distractors share overlapping features
+  - Requires careful comparison
+- Integration level: Moderate integration across subjects (for example pathology + physiology, microbiology + immunology).
+- Data interpretation: Moderate (labs, exposures, medication history, pathology descriptions).`,
+  hard: `Hard
+- Purpose: Test deep mechanistic understanding and multi-step reasoning.
+- Reasoning depth: 3 or more reasoning steps.
+- Concept scope: Multi-domain integration and advanced understanding of mechanisms.
+- Stem characteristics:
+  - Dense vignette (6-12 sentences)
+  - Realistic clinical complexity
+  - Multiple clues mixed with irrelevant information
+  - Requires prioritizing subtle findings
+  - Diagnosis may not be explicitly obvious
+- Cognitive operations:
+  - Multi-step inference
+  - Mechanistic reasoning
+  - Integration across systems
+  - Filtering signal from noise
+  - Predicting downstream effects
+- Typical question targets:
+  - Infer molecular mechanism from clinical findings
+  - Predict downstream physiologic consequences
+  - Distinguish between closely related disorders
+  - Determine mechanism of a treatment response
+  - Identify pathway defects or signaling abnormalities
+- Distractor style:
+  - Very strong distractors
+  - Near-neighbor concepts
+  - Answers differ by subtle mechanistic distinctions
+- Integration level: High integration across pathology, physiology, pharmacology, microbiology, immunology, biochemistry, anatomy, and genetics.
+- Data interpretation: High and may require interpretation of labs, imaging descriptions, pathology, timelines, or treatment effects.`,
+};
+
+const DIFFICULTY_CONTROL_DIMENSIONS = `Difficulty control dimensions
+- Reasoning steps: Easy = 1 step, Medium = 2 steps, Hard = 3+ steps.
+- Diagnostic clarity: Easy = obvious classic presentation, Medium = multiple plausible diagnoses, Hard = diagnosis may be indirect or not the final target.
+- Distractor similarity: Easy = broad distractors, Medium = related distractors, Hard = near-neighbor distractors.
+- Integration level: Easy = single discipline, Medium = limited cross-discipline integration, Hard = multi-discipline integration.
+- Data interpretation: Easy = minimal, Medium = moderate, Hard = substantial.
+- Stem density: Easy = concise, Medium = moderate detail, Hard = dense and complex.`;
 
 const DIFFICULTY_PROFILES = {
   targeted: {
     label: "targeted",
     title: "Targeted",
     emoji: "🎯",
-    promptMode: "hard",
-    difficultyInstruction:
-      "Target harder board-style difficulty: require multi-step integration, subtler distractors, and less obvious cueing.",
+    promptMode: "medium",
+    difficulty: "medium",
   },
   easy: {
     label: "easy",
     title: "Easy",
+    emoji: "🥚",
+    promptMode: "easy",
+    difficulty: "easy",
+  },
+  medium: {
+    label: "medium",
+    title: "Medium",
     emoji: "🐣",
-    difficultyInstruction:
-      "Target easier board-style difficulty: mostly single-step to moderate reasoning and high-yield fundamentals.",
+    promptMode: "medium",
+    difficulty: "medium",
   },
   hard: {
     label: "hard",
     title: "Hard",
-    emoji: "🍳",
-    difficultyInstruction:
-      "Target harder board-style difficulty: require multi-step integration, subtler distractors, and less obvious cueing.",
+    emoji: "🐓",
+    promptMode: "hard",
+    difficulty: "hard",
   },
 };
 
@@ -195,11 +322,34 @@ const normalizeModeKey = (mode) => {
   return QUESTION_MODES.includes(value) ? value : "";
 };
 
+const normalizeDifficultyKey = (difficulty) => {
+  const value = String(difficulty || "")
+    .trim()
+    .toLowerCase();
+  return QUESTION_DIFFICULTIES.includes(value) ? value : "";
+};
+
+const getDifficultyProfile = (mode) => {
+  const safeMode = normalizeModeKey(mode) || DEFAULT_MODE;
+  return DIFFICULTY_PROFILES[safeMode] || DIFFICULTY_PROFILES[DEFAULT_MODE];
+};
+
+const getDifficultyForMode = (mode) =>
+  normalizeDifficultyKey(getDifficultyProfile(mode).difficulty) || "easy";
+
 const normalizeChoiceKey = (key) => {
   const upper = String(key || "")
     .trim()
     .toUpperCase();
   return CHOICE_KEYS.includes(upper) ? upper : "";
+};
+
+const makeModeMap = (valueFactory) => {
+  const out = {};
+  for (const mode of QUESTION_MODES) {
+    out[mode] = valueFactory(mode);
+  }
+  return out;
 };
 
 const normalizeWrongTopicKey = (topic) => {
@@ -382,7 +532,7 @@ const parseCommandPayload = (rawOutput) => {
   if (!parsed || typeof parsed !== "object" || parsed.error) return null;
   if (!Array.isArray(parsed.contexts)) return null;
 
-  const contexts = { targeted: null, easy: null, hard: null };
+  const contexts = makeModeMap(() => null);
   for (const entry of parsed.contexts) {
     const context = parseModeContext(entry);
     if (!context) return null;
@@ -390,8 +540,7 @@ const parseCommandPayload = (rawOutput) => {
     contexts[context.mode] = context;
   }
 
-  if (!contexts.easy || !contexts.hard) return null;
-  if (contexts.easy.path === contexts.hard.path) return null;
+  if (!contexts.easy || !contexts.medium || !contexts.hard) return null;
 
   const warning =
     typeof parsed.warning === "string" && parsed.warning.trim()
@@ -451,10 +600,16 @@ const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
   const profile =
     difficultyProfile && typeof difficultyProfile === "object"
       ? difficultyProfile
-      : DIFFICULTY_PROFILES[safeMode];
-  const promptMode = normalizeModeKey(profile && profile.promptMode)
-    ? normalizeModeKey(profile.promptMode)
-    : safeMode;
+      : getDifficultyProfile(safeMode);
+  const promptMode =
+    normalizeModeKey(profile && profile.promptMode) || safeMode;
+  const promptDifficulty =
+    normalizeDifficultyKey(profile && profile.difficulty) ||
+    getDifficultyForMode(promptMode) ||
+    getDifficultyForMode(safeMode);
+  const difficultyBlock =
+    DIFFICULTY_PROMPT_BLOCKS[promptDifficulty] ||
+    DIFFICULTY_PROMPT_BLOCKS.easy;
   const contextData =
     topicContext && typeof topicContext === "object" ? topicContext : {};
   const cleanedPairs = Array.isArray(contextData.samplePairs)
@@ -464,7 +619,17 @@ const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
   const systemMessage =
     "You create rigorous USMLE Step 1 single-best-answer questions. Return only valid JSON.";
 
-  const userMessage = `Difficulty mode: ${promptMode.toUpperCase()}
+  const noteExamples = cleanedPairs.length
+    ? cleanedPairs
+        .map(
+          (pair, index) =>
+            `${index + 1}. Q: ${pair.q}\n   A: ${pair.a}`,
+        )
+        .join("\n")
+    : "No sample Q/A pairs available for this topic.";
+
+  const userMessage = `Widget mode: ${safeMode.toUpperCase()}
+Question difficulty: ${promptDifficulty.toUpperCase()}
 Topic: ${contextData.topic}
 
 You are generating a single USMLE Step 1-style multiple-choice question.
@@ -492,14 +657,20 @@ Rules:
 - Do not include markdown fences or extra text outside JSON.
 - Escape quotation marks correctly so the output is valid JSON.
 
+Topic grounding:
+- Stay tightly focused on the topic above.
+- Use the sample note material when helpful, but write a fresh question rather than copying it.
+- Sample note Q/A pairs:
+${noteExamples}
+
 Step 1 style requirements:
 - Prefer a clinical vignette when the topic supports it.
 - Use patient age, sex, presentation, relevant history, physical exam, labs, imaging, pathology, or pharmacology only when they meaningfully contribute to reasoning.
-- The question should require connecting at least 2 concepts when possible, such as presentation -> mechanism, drug -> adverse effect, mutation -> pathway, pathology -> physiology, organism -> virulence factor, or lab finding -> diagnosis.
+- Match the reasoning depth and integration level to the requested difficulty exactly.
 - Focus on mechanisms, pathophysiology, pharmacology, microbiology, immunology, genetics, biochemistry, physiology, and pathology in an integrated way.
-- Avoid pure trivia and avoid asking for isolated fact recall unless the item is intentionally easy.
-- Avoid buzzword stacking and avoid making the diagnosis or answer too obvious from a single clue.
-- Do not write stems that simply ask for a definition unless difficulty mode is easy.
+- Avoid pure trivia and avoid isolated fact recall unless the requested difficulty explicitly allows it.
+- Avoid buzzword stacking and avoid making the diagnosis or answer too obvious from a single clue unless the requested difficulty is easy.
+- Do not write stems that simply ask for a definition unless the requested difficulty is easy.
 - Internally decide what the question is primarily testing: mechanism, diagnosis, pathology, pharmacology, microbiology, immunology, genetics, physiology, or biochemistry, and keep the item tightly focused on that.
 
 Stem quality requirements:
@@ -528,10 +699,11 @@ Topic-specific content guidance:
 - When appropriate, ask about mechanism of action, adverse effect, resistance mechanism, toxin effect, virulence factor, signaling pathway, enzyme deficiency, inheritance pattern, histologic finding, receptor effect, compensatory physiologic response, or biochemical consequence.
 
 Difficulty requirements:
-- Difficulty mode will be either EASY or HARD.
-- Easy: use clearer clues, a shorter reasoning chain, and more direct concept integration, but still make it feel like a real Step 1 prep item rather than a trivia question.
-- Hard: require multi-step reasoning, use fewer giveaway clues, and make distractors more similar and more tempting.
-- ${profile.difficultyInstruction}
+- Use ${promptDifficulty.toUpperCase()} difficulty for this item.
+- Apply this exact rubric:
+${difficultyBlock}
+- ${DIFFICULTY_CONTROL_DIMENSIONS}
+- Keep the stem, distractors, integration level, and reasoning chain aligned with ${promptDifficulty.toUpperCase()} rather than drifting easier or harder.
 
 Quality control before finalizing:
 - Ensure only one answer is unambiguously correct.
@@ -1937,7 +2109,7 @@ export const render = (
   if (!rawData || rawData.error) {
     return (
       <div className="card">
-        <div className="title">USMLE Practice Question</div>
+        <div className="title">USMLE Question</div>
         <div className="error">{rawData?.error || "No data yet."}</div>
       </div>
     );
@@ -1947,7 +2119,7 @@ export const render = (
   if (!parsedPayload) {
     return (
       <div className="card">
-        <div className="title">USMLE Practice Question</div>
+        <div className="title">USMLE Question</div>
         <div className="error">Unexpected data shape from command output.</div>
       </div>
     );
@@ -2190,7 +2362,7 @@ export const render = (
   return (
     <div className="card">
       <div className="header">
-        <div className="title">USMLE Practice Question</div>
+        <div className="title">USMLE Question</div>
         <div className="headerBtns">
           <button
             className={getModeButtonClassName("targeted")}
