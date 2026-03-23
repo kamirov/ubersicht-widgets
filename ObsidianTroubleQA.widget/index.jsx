@@ -1,11 +1,13 @@
 import { run } from "uebersicht";
 
 export const refreshFrequency = false;
+const WIDGET_ENABLED = false;
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const TROUBLE_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";
 
-export const command = `
+export const command = WIDGET_ENABLED
+  ? `
 "${NODE}" <<'EOF'
 const fs = require("fs");
 
@@ -87,7 +89,8 @@ function main() {
 
 main();
 EOF
-`;
+`
+  : "";
 
 const AUTO_REFRESH_TARGET_MINUTE = 59;
 const autoRefreshState = {
@@ -581,6 +584,8 @@ export const render = (
   { output, error, storeError, expanded, removed },
   dispatch,
 ) => {
+  if (!WIDGET_ENABLED) return null;
+
   ensureAutoRefresh(dispatch);
 
   if (error) {
@@ -619,73 +624,75 @@ export const render = (
         <div className="title">Review Questions</div>
       </div>
 
-      {storeError ? <div className="warn">{storeError}</div> : null}
+      <div className="cardBody">
+        {storeError ? <div className="warn">{storeError}</div> : null}
 
-      {visibleItems.length === 0 ? (
-        <div className="empty">No review questions yet.</div>
-      ) : (
-        <div className="list">
-          {visibleItems.map((item, i) => {
-            const topic = typeof item.topic === "string" ? item.topic : "";
-            const question =
-              typeof item.question === "string" ? item.question : "";
-            const answer = typeof item.answer === "string" ? item.answer : "";
-            const rowKey = item.id || String(i);
-            const isOpen = !!expanded[rowKey];
+        {visibleItems.length === 0 ? (
+          <div className="empty">No review questions yet.</div>
+        ) : (
+          <div className="list">
+            {visibleItems.map((item, i) => {
+              const topic = typeof item.topic === "string" ? item.topic : "";
+              const question =
+                typeof item.question === "string" ? item.question : "";
+              const answer = typeof item.answer === "string" ? item.answer : "";
+              const rowKey = item.id || String(i);
+              const isOpen = !!expanded[rowKey];
 
-            const onChatGPT = (e) => {
-              e.stopPropagation();
-              const prompt = `(${topic}) ${question}. Please include detail as would be appropriate to studying for Step 1`;
-              const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
-              run(`open '${escapeForSingleQuotedShell(url)}'`);
-            };
+              const onChatGPT = (e) => {
+                e.stopPropagation();
+                const prompt = `(${topic}) ${question}. Please include detail as would be appropriate to studying for Step 1`;
+                const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
+                run(`open '${escapeForSingleQuotedShell(url)}'`);
+              };
 
-            const onRemove = (e) => {
-              e.stopPropagation();
-              dispatch({ type: "REMOVE_OPTIMISTIC", id: rowKey });
-              removeTroubleItem(rowKey, dispatch);
-            };
+              const onRemove = (e) => {
+                e.stopPropagation();
+                dispatch({ type: "REMOVE_OPTIMISTIC", id: rowKey });
+                removeTroubleItem(rowKey, dispatch);
+              };
 
-            return (
-              <div key={rowKey} className="item">
-                <div
-                  className="qRow"
-                  onClick={() =>
-                    dispatch({ type: "TOGGLE_ANSWER", idx: rowKey })
-                  }
-                >
-                  <span className="cb" onClick={onRemove}>
-                    ✓
-                  </span>
-                  <div className="qBlock">
-                    <div className="topic">{topic || "Unknown topic"}</div>
-                    <div className="qText">
-                      {question || "(No question text)"}
-                    </div>
-                  </div>
-                  <button
-                    className="chatgptBtn"
-                    onClick={onChatGPT}
-                    title="Ask ChatGPT"
-                  >
-                    💬
-                  </button>
-                  <span className="chev">{isOpen ? "▾" : "▸"}</span>
-                </div>
-
-                {isOpen && answer ? (
+              return (
+                <div key={rowKey} className="item">
                   <div
-                    className="answer markdown"
-                    dangerouslySetInnerHTML={{
-                      __html: renderMarkdownToHtml(answer),
-                    }}
-                  />
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      )}
+                    className="qRow"
+                    onClick={() =>
+                      dispatch({ type: "TOGGLE_ANSWER", idx: rowKey })
+                    }
+                  >
+                    <span className="cb" onClick={onRemove}>
+                      ✓
+                    </span>
+                    <div className="qBlock">
+                      <div className="topic">{topic || "Unknown topic"}</div>
+                      <div className="qText">
+                        {question || "(No question text)"}
+                      </div>
+                    </div>
+                    <button
+                      className="chatgptBtn"
+                      onClick={onChatGPT}
+                      title="Ask ChatGPT"
+                    >
+                      💬
+                    </button>
+                    <span className="chev">{isOpen ? "▾" : "▸"}</span>
+                  </div>
+
+                  {isOpen && answer ? (
+                    <div
+                      className="answer markdown"
+                      dangerouslySetInnerHTML={{
+                        __html: renderMarkdownToHtml(answer),
+                      }}
+                    />
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
@@ -700,7 +707,10 @@ export const className = `
   color: rgba(255,255,255,0.92);
 
   .card {
+    display: flex;
+    flex-direction: column;
     padding: 14px 16px;
+    max-height: calc(100vh - 48px);
     border-radius: 16px;
     background: rgba(0,0,0,0.45);
     backdrop-filter: blur(14px);
@@ -712,7 +722,14 @@ export const className = `
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-shrink: 0;
     margin-bottom: 10px;
+  }
+
+  .cardBody {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .title {

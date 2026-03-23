@@ -421,48 +421,52 @@ export const render = ({ output, error, refreshing }, dispatch) => {
         </div>
       </div>
 
-      {error ? <div className="error">{error}</div> : null}
+      <div className="cardBody">
+        {error ? <div className="error">{error}</div> : null}
 
-      {!error && !output.trim() ? (
-        <div className="loading">Loading note scan...</div>
-      ) : null}
+        {!error && !output.trim() ? (
+          <div className="loading">Loading note scan...</div>
+        ) : null}
 
-      {!error && output.trim() && !parsed.ok ? (
-        parsed.isNoCandidates ? (
-          <div>
-            <div className="empty">No ineligible notes found.</div>
-            <div className="meta">
-              {parsed.totalMarkdownFiles} markdown notes scanned.
+        {!error && output.trim() && !parsed.ok ? (
+          parsed.isNoCandidates ? (
+            <div>
+              <div className="empty">No ineligible notes found.</div>
+              <div className="meta">
+                {parsed.totalMarkdownFiles} markdown notes scanned.
+              </div>
             </div>
-          </div>
-        ) : (
-          <div>
-            <div className="error">
-              {parsed.error || "Could not load notes."}
+          ) : (
+            <div>
+              <div className="error">
+                {parsed.error || "Could not load notes."}
+              </div>
+              {parsed.raw ? <pre className="raw">{parsed.raw}</pre> : null}
             </div>
-            {parsed.raw ? <pre className="raw">{parsed.raw}</pre> : null}
-          </div>
-        )
-      ) : null}
+          )
+        ) : null}
 
-      {!error && parsed.ok ? (
-        <div className="meta">{parsed.candidateCount} notes remain</div>
-      ) : null}
+        {!error && parsed.ok ? (
+          <div className="meta">{parsed.candidateCount} notes remain</div>
+        ) : null}
+      </div>
     </div>
   );
 };
 
 export const className = `
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 24px;
+  left: 24px;
   width: 460px;
 
   font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   color: rgba(255,255,255,0.92);
 
   .card {
+    display: flex;
+    flex-direction: column;
     padding: 14px 16px;
+    max-height: calc(100vh - 48px);
     border-radius: 16px;
     background: rgba(0,0,0,0.45);
     backdrop-filter: blur(14px);
@@ -475,7 +479,14 @@ export const className = `
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+    flex-shrink: 0;
     margin-bottom: 10px;
+  }
+
+  .cardBody {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .title {

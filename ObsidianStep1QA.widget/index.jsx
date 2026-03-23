@@ -2520,127 +2520,133 @@ export const render = (
         </div>
       </div>
 
-      {apiKeyWarning ? <div className="warn">{apiKeyWarning}</div> : null}
-      {cacheWarning ? <div className="warn">{cacheWarning}</div> : null}
-      {wrongTopicWarning ? (
-        <div className="warn">{wrongTopicWarning}</div>
-      ) : null}
-      {commandWarning ? <div className="warn">{commandWarning}</div> : null}
+      <div className="cardBody">
+        {apiKeyWarning ? <div className="warn">{apiKeyWarning}</div> : null}
+        {cacheWarning ? <div className="warn">{cacheWarning}</div> : null}
+        {wrongTopicWarning ? (
+          <div className="warn">{wrongTopicWarning}</div>
+        ) : null}
+        {commandWarning ? <div className="warn">{commandWarning}</div> : null}
 
-      {!hasApiKey ? (
-        <div className="warn">
-          Set `openai-settings.json` with your OpenAI key.
-        </div>
-      ) : null}
+        {!hasApiKey ? (
+          <div className="warn">
+            Set `openai-settings.json` with your OpenAI key.
+          </div>
+        ) : null}
 
-      {activeLoading ? (
-        <div className="loading">
-          Generating {activeProfile.label} Step 1 question...
-        </div>
-      ) : null}
+        {activeLoading ? (
+          <div className="loading">
+            Generating {activeProfile.label} Step 1 question...
+          </div>
+        ) : null}
 
-      {!activeLoading && activeQuestionError ? (
-        <div className="error">{activeQuestionError}</div>
-      ) : null}
+        {!activeLoading && activeQuestionError ? (
+          <div className="error">{activeQuestionError}</div>
+        ) : null}
 
-      {!activeLoading && !activeQuestion && !activeQuestionError ? (
-        <div className="loading">Question not generated yet.</div>
-      ) : null}
+        {!activeLoading && !activeQuestion && !activeQuestionError ? (
+          <div className="loading">Question not generated yet.</div>
+        ) : null}
 
-      {!activeLoading && activeQuestion ? (
-        <div className="questionWrap">
-          <div className="stem">
-            {activeQuestion.stem}
-            {revealed && revealedTopicLabel ? (
-              <span>
-                {" ["}
-                <button className="stemTopicLink" onClick={onOpenRevealedTopic}>
-                  {revealedTopicLabel}
-                </button>
-                {"]"}
-              </span>
+        {!activeLoading && activeQuestion ? (
+          <div className="questionWrap">
+            <div className="stem">
+              {activeQuestion.stem}
+              {revealed && revealedTopicLabel ? (
+                <span>
+                  {" ["}
+                  <button
+                    className="stemTopicLink"
+                    onClick={onOpenRevealedTopic}
+                  >
+                    {revealedTopicLabel}
+                  </button>
+                  {"]"}
+                </span>
+              ) : null}
+            </div>
+            <div className="choices">
+              {activeQuestion.choices.map((choice) => {
+                const key = choice.key;
+                const selected = selectedKey === key;
+                const isCorrect = key === activeQuestion.correctKey;
+
+                const stateClass = revealed
+                  ? isCorrect
+                    ? "choiceCorrect"
+                    : "choiceWrong"
+                  : selected
+                    ? "choiceSelected"
+                    : "";
+
+                const selectedResultClass =
+                  revealed && selected
+                    ? isCorrect
+                      ? "choiceBtnSelectedCorrect"
+                      : "choiceBtnSelectedWrong"
+                    : "";
+
+                return (
+                  <div key={key} className={`choiceWrap ${stateClass}`}>
+                    <button
+                      className={`choiceBtn ${selectedResultClass}`}
+                      onClick={() => {
+                        const alreadyRevealed = !!revealed;
+                        const wasCorrect =
+                          !!activeQuestion &&
+                          typeof activeQuestion === "object" &&
+                          normalizeChoiceKey(activeQuestion.correctKey) === key;
+                        const topicForWrongCount =
+                          activeContext &&
+                          typeof activeContext.topic === "string"
+                            ? activeContext.topic
+                            : "";
+                        dispatch({ type: "SELECT_ANSWER", mode, key });
+                        if (!alreadyRevealed && !wasCorrect) {
+                          persistWrongTopicIncrement({
+                            modeKey: mode,
+                            topic: topicForWrongCount,
+                            question: activeQuestion,
+                          });
+                        }
+                        if (
+                          !alreadyRevealed &&
+                          wasCorrect &&
+                          mode === "targeted"
+                        ) {
+                          persistTargetedCorrectDecrement({
+                            modeKey: mode,
+                            topic: topicForWrongCount,
+                            question: activeQuestion,
+                          });
+                        }
+                        if (!alreadyRevealed && cachedQuestionByMode[mode]) {
+                          persistQuestionRemoval(mode);
+                        }
+                      }}
+                    >
+                      <span className="choiceKey">{key}.</span>
+                      <span className="choiceText">{choice.text}</span>
+                    </button>
+                    {revealed ? (
+                      <div className="choiceExplanation">
+                        {choice.explanation}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+
+            {revealed ? (
+              <div className="correctExplain">
+                Correct answer: <strong>{activeQuestion.correctKey}</strong>.{" "}
+                {activeQuestion.correctExplanation}
+              </div>
             ) : null}
           </div>
-          <div className="choices">
-            {activeQuestion.choices.map((choice) => {
-              const key = choice.key;
-              const selected = selectedKey === key;
-              const isCorrect = key === activeQuestion.correctKey;
-
-              const stateClass = revealed
-                ? isCorrect
-                  ? "choiceCorrect"
-                  : "choiceWrong"
-                : selected
-                  ? "choiceSelected"
-                  : "";
-
-              const selectedResultClass =
-                revealed && selected
-                  ? isCorrect
-                    ? "choiceBtnSelectedCorrect"
-                    : "choiceBtnSelectedWrong"
-                  : "";
-
-              return (
-                <div key={key} className={`choiceWrap ${stateClass}`}>
-                  <button
-                    className={`choiceBtn ${selectedResultClass}`}
-                    onClick={() => {
-                      const alreadyRevealed = !!revealed;
-                      const wasCorrect =
-                        !!activeQuestion &&
-                        typeof activeQuestion === "object" &&
-                        normalizeChoiceKey(activeQuestion.correctKey) === key;
-                      const topicForWrongCount =
-                        activeContext && typeof activeContext.topic === "string"
-                          ? activeContext.topic
-                          : "";
-                      dispatch({ type: "SELECT_ANSWER", mode, key });
-                      if (!alreadyRevealed && !wasCorrect) {
-                        persistWrongTopicIncrement({
-                          modeKey: mode,
-                          topic: topicForWrongCount,
-                          question: activeQuestion,
-                        });
-                      }
-                      if (
-                        !alreadyRevealed &&
-                        wasCorrect &&
-                        mode === "targeted"
-                      ) {
-                        persistTargetedCorrectDecrement({
-                          modeKey: mode,
-                          topic: topicForWrongCount,
-                          question: activeQuestion,
-                        });
-                      }
-                      if (!alreadyRevealed && cachedQuestionByMode[mode]) {
-                        persistQuestionRemoval(mode);
-                      }
-                    }}
-                  >
-                    <span className="choiceKey">{key}.</span>
-                    <span className="choiceText">{choice.text}</span>
-                  </button>
-                  {revealed ? (
-                    <div className="choiceExplanation">
-                      {choice.explanation}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-
-          {revealed ? (
-            <div className="correctExplain">
-              Correct answer: <strong>{activeQuestion.correctKey}</strong>.{" "}
-              {activeQuestion.correctExplanation}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 };
@@ -2654,7 +2660,10 @@ export const className = `
   color: rgba(255,255,255,0.92);
 
   .card {
+    display: flex;
+    flex-direction: column;
     padding: 14px 16px;
+    max-height: calc(100vh - 48px);
     border-radius: 16px;
     background: rgba(0,0,0,0.45);
     backdrop-filter: blur(14px);
@@ -2666,7 +2675,14 @@ export const className = `
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-shrink: 0;
     margin-bottom: 10px;
+  }
+
+  .cardBody {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .title {

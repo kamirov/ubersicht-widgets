@@ -1,6 +1,7 @@
 import { run } from "uebersicht";
 
 export const refreshFrequency = false;
+const WIDGET_ENABLED = false;
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 
 const NOTES_DIR =
@@ -12,7 +13,8 @@ const TROUBLE_STORE =
 const LAST_NOTE_STORE = "/tmp/obsidianqa-last-note-selection.json";
 
 // ===================== DATA FETCH =====================
-export const command = `
+export const command = WIDGET_ENABLED
+  ? `
 "${NODE}" <<'EOF'
 const fs = require("fs");
 const path = require("path");
@@ -171,7 +173,8 @@ function main() {
 
 main();
 EOF
-`;
+`
+  : "";
 
 const AUTO_REFRESH_TARGET_MINUTE = 59;
 const autoRefreshState = {
@@ -928,6 +931,8 @@ export const render = (
   },
   dispatch,
 ) => {
+  if (!WIDGET_ENABLED) return null;
+
   ensureAutoRefresh(dispatch);
 
   if (error) {
@@ -1001,88 +1006,90 @@ export const render = (
         </div>
       </div>
 
-      {storeError ? <div className="warn">{storeError}</div> : null}
+      <div className="cardBody">
+        {storeError ? <div className="warn">{storeError}</div> : null}
 
-      <div className="list">
-        {data.pairs.map((pair, i) => {
-          const safePair =
-            pair && typeof pair === "object" ? pair : { q: "", a: "" };
-          const question = typeof safePair.q === "string" ? safePair.q : "";
-          const answer = typeof safePair.a === "string" ? safePair.a : "";
-          const id = makeItemId(data.path || "", question);
+        <div className="list">
+          {data.pairs.map((pair, i) => {
+            const safePair =
+              pair && typeof pair === "object" ? pair : { q: "", a: "" };
+            const question = typeof safePair.q === "string" ? safePair.q : "";
+            const answer = typeof safePair.a === "string" ? safePair.a : "";
+            const id = makeItemId(data.path || "", question);
 
-          const isOpen = !!expanded[i];
-          const optimistic = Object.prototype.hasOwnProperty.call(checked, id)
-            ? checked[id]
-            : null;
-          const persisted = !!persistedIds[id];
-          const isChecked = optimistic === null ? persisted : !!optimistic;
+            const isOpen = !!expanded[i];
+            const optimistic = Object.prototype.hasOwnProperty.call(checked, id)
+              ? checked[id]
+              : null;
+            const persisted = !!persistedIds[id];
+            const isChecked = optimistic === null ? persisted : !!optimistic;
 
-          const onChatGPT = (e) => {
-            e.stopPropagation();
-            const prompt = `(${title}) ${question}. Please include detail as would be appropriate to studying for Step 1`;
-            const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
-            run(`open '${escapeForSingleQuotedShell(url)}'`);
-          };
+            const onChatGPT = (e) => {
+              e.stopPropagation();
+              const prompt = `(${title}) ${question}. Please include detail as would be appropriate to studying for Step 1`;
+              const url = `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
+              run(`open '${escapeForSingleQuotedShell(url)}'`);
+            };
 
-          const onToggleCheck = (e) => {
-            e.stopPropagation();
-            const nextChecked = !isChecked;
+            const onToggleCheck = (e) => {
+              e.stopPropagation();
+              const nextChecked = !isChecked;
 
-            dispatch({ type: "TOGGLE_CHECK_OPTIMISTIC", id, nextChecked });
+              dispatch({ type: "TOGGLE_CHECK_OPTIMISTIC", id, nextChecked });
 
-            mutateTroubleStore(
-              {
-                action: nextChecked ? "add" : "remove",
-                item: {
-                  id,
-                  topic: title,
-                  question,
-                  answer,
-                  notePath: data.path || "",
-                  noteFile: data.file || "",
+              mutateTroubleStore(
+                {
+                  action: nextChecked ? "add" : "remove",
+                  item: {
+                    id,
+                    topic: title,
+                    question,
+                    answer,
+                    notePath: data.path || "",
+                    noteFile: data.file || "",
+                  },
                 },
-              },
-              dispatch,
-            );
-          };
+                dispatch,
+              );
+            };
 
-          return (
-            <div key={id || i} className="item">
-              <div
-                className="qRow"
-                onClick={() => dispatch({ type: "TOGGLE_ANSWER", idx: i })}
-              >
-                <span
-                  className={`cb ${isChecked ? "cbOn" : ""}`}
-                  onClick={onToggleCheck}
-                >
-                  {isChecked ? "✓" : ""}
-                </span>
-
-                <span className="qIndex">{i + 1}.</span>
-                <span className="qText">{question}</span>
-                <button
-                  className="chatgptBtn"
-                  onClick={onChatGPT}
-                  title="Ask ChatGPT"
-                >
-                  💬
-                </button>
-                <span className="chev">{isOpen ? "▾" : "▸"}</span>
-              </div>
-
-              {isOpen && answer ? (
+            return (
+              <div key={id || i} className="item">
                 <div
-                  className="answer markdown"
-                  dangerouslySetInnerHTML={{
-                    __html: renderMarkdownToHtml(answer),
-                  }}
-                />
-              ) : null}
-            </div>
-          );
-        })}
+                  className="qRow"
+                  onClick={() => dispatch({ type: "TOGGLE_ANSWER", idx: i })}
+                >
+                  <span
+                    className={`cb ${isChecked ? "cbOn" : ""}`}
+                    onClick={onToggleCheck}
+                  >
+                    {isChecked ? "✓" : ""}
+                  </span>
+
+                  <span className="qIndex">{i + 1}.</span>
+                  <span className="qText">{question}</span>
+                  <button
+                    className="chatgptBtn"
+                    onClick={onChatGPT}
+                    title="Ask ChatGPT"
+                  >
+                    💬
+                  </button>
+                  <span className="chev">{isOpen ? "▾" : "▸"}</span>
+                </div>
+
+                {isOpen && answer ? (
+                  <div
+                    className="answer markdown"
+                    dangerouslySetInnerHTML={{
+                      __html: renderMarkdownToHtml(answer),
+                    }}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -1098,7 +1105,10 @@ export const className = `
   color: rgba(255,255,255,0.92);
 
   .card {
+    display: flex;
+    flex-direction: column;
     padding: 14px 16px;
+    max-height: calc(100vh - 48px);
     border-radius: 16px;
     background: rgba(0,0,0,0.45);
     backdrop-filter: blur(14px);
@@ -1110,7 +1120,14 @@ export const className = `
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-shrink: 0;
     margin-bottom: 10px;
+  }
+
+  .cardBody {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .title {
