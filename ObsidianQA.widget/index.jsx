@@ -5,7 +5,7 @@ const WIDGET_ENABLED = false;
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 
 const NOTES_DIR =
-  "/Users/kamirov/Library/CloudStorage/GoogleDrive-andrei.khramtsov@gmail.com/My Drive/Hole In The Ground/👨‍⚕️ Medicine/Exploring";
+  "/Users/kamirov/Documents/The Source";
 
 const TROUBLE_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";

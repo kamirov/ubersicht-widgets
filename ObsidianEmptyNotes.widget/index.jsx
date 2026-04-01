@@ -4,7 +4,7 @@ export const refreshFrequency = false;
 
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const NOTES_DIR =
-  "/Users/kamirov/Library/CloudStorage/GoogleDrive-andrei.khramtsov@gmail.com/My Drive/Hole In The Ground/👨‍⚕️ Medicine/Exploring";
+  "/Users/kamirov/Documents/The Source";
 const NO_INELIGIBLE_NOTES_ERROR = "No ineligible notes found.";
 
 export const command = `
