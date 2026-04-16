@@ -5,7 +5,7 @@ const WIDGET_ENABLED = false;
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 
 const NOTES_DIR =
-  "/Users/kamirov/Documents/The Source";
+  "/Users/kamirov/Documents/The Destination/👨‍⚕️ Medicine/Exploring";
 
 const TROUBLE_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/ObsidianQA.widget/trouble-questions.json";
@@ -44,14 +44,38 @@ function shuffle(arr) {
   return arr;
 }
 
-function extractSection(text, header) {
-  const esc = header.replace(/[.*+?^()[\\]{}|\\\\]/g, "\\\\$&");
-  const re = new RegExp("^##\\\\s+" + esc + "\\\\s*$([\\\\s\\\\S]*?)(?=^##\\\\s+|\\\\Z)", "m");
-  const m = text.match(re);
-  if (!m) return "";
-  let section = m[1] || "";
-  section = section.replace(/^\\s*\\n+/, "").replace(/\\n+\\s*$/, "");
-  return section.trim();
+function normalizeHeadingLabel(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function extractSection(text, headers) {
+  const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
+  const lines = normalized.split("\\n");
+  const targets = new Set(
+    (Array.isArray(headers) ? headers : [headers]).map(normalizeHeadingLabel),
+  );
+
+  let start = -1;
+  let end = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed.startsWith("#")) continue;
+
+    const sectionName = normalizeHeadingLabel(trimmed.replace(/^#+\\s*/, ""));
+    if (start === -1) {
+      if (targets.has(sectionName)) start = i + 1;
+      continue;
+    }
+
+    end = i;
+    break;
+  }
+
+  if (start === -1) return "";
+  return lines.slice(start, end).join("\\n").trim();
 }
 
 function splitNumberedList(sectionText) {
@@ -124,8 +148,8 @@ function main() {
     try { text = fs.readFileSync(file, "utf8"); }
     catch { continue; }
 
-    const qSection = extractSection(text, "Questions");
-    const aSection = extractSection(text, "Answers");
+    const qSection = extractSection(text, ["Question", "Questions"]);
+    const aSection = extractSection(text, ["Answer", "Answers"]);
     if (!qSection || !aSection) continue;
 
     const qs = splitNumberedList(qSection);

@@ -4,7 +4,7 @@ export const refreshFrequency = false;
 
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const NOTES_DIR =
-  "/Users/kamirov/Documents/The Source";
+  "/Users/kamirov/Documents/The Destination/👨‍⚕️ Medicine/Exploring";
 const NO_INELIGIBLE_NOTES_ERROR = "No ineligible notes found.";
 
 export const command = `
@@ -36,66 +36,80 @@ function walk(dir) {
   return results;
 }
 
-function extractSection(text, header) {
-  const esc = header.replace(/[.*+?^()[\\]{}|\\\\]/g, "\\\\$&");
-  const re = new RegExp(
-    "^##\\\\s+" + esc + "\\\\s*$([\\\\s\\\\S]*?)(?=^##\\\\s+|\\\\Z)",
-    "m",
-  );
-  const m = text.match(re);
-  if (!m) return "";
-  let section = m[1] || "";
-  section = section.replace(/^\\s*\\n+/, "").replace(/\\n+\\s*$/, "");
-  return section.trim();
+function normalizeHeadingLabel(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
 }
 
-function splitNumberedList(sectionText) {
-  const text = (sectionText || "").replace(/\\r\\n/g, "\\n").trim();
-  if (!text) return [];
+function extractSection(text, headers) {
+  const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
+  const lines = normalized.split("\\n");
+  const targets = new Set(
+    (Array.isArray(headers) ? headers : [headers]).map(normalizeHeadingLabel),
+  );
 
-  const starts = [];
-  const re = /^\\s*(\\d+)\\.(\\s+|$)/gm;
-  let m;
-  while ((m = re.exec(text)) !== null) starts.push(m.index);
-  if (starts.length === 0) return null;
+  let start = -1;
+  let end = lines.length;
 
-  const items = [];
-  for (let i = 0; i < starts.length; i++) {
-    const start = starts[i];
-    const end = i + 1 < starts.length ? starts[i + 1] : text.length;
-    let chunk = text.slice(start, end).trim();
-    chunk = chunk.replace(/^\\s*\\d+\\.\\s*/, "");
-    items.push(chunk.trim());
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed.startsWith("#")) continue;
+
+    const sectionName = normalizeHeadingLabel(trimmed.replace(/^#+\\s*/, ""));
+    if (start === -1) {
+      if (targets.has(sectionName)) start = i + 1;
+      continue;
+    }
+
+    end = i;
+    break;
   }
-  return items;
+
+  if (start === -1) return "";
+  return lines.slice(start, end).join("\\n").trim();
 }
 
 function isEligibleForQaWidget(text) {
-  const qSection = extractSection(text, "Questions");
-  const aSection = extractSection(text, "Answers");
-  if (!qSection || !aSection) return false;
+  const qSection = extractSection(text, ["Question", "Questions"]);
+  const aSection = extractSection(text, ["Answer", "Answers"]);
+  return Boolean(qSection && aSection);
+}
 
-  const qs = splitNumberedList(qSection);
-  const as = splitNumberedList(aSection);
-  if (qs === null || as === null) return false;
-  if (qs.length === 0 || as.length === 0) return false;
-  if (qs.length !== as.length) return false;
-  return true;
+function isDateToday(value) {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) return false;
+  const now = new Date();
+  return (
+    value.getFullYear() === now.getFullYear() &&
+    value.getMonth() === now.getMonth() &&
+    value.getDate() === now.getDate()
+  );
 }
 
 function main() {
   if (!fs.existsSync(NOTES_DIR)) {
-    console.log(JSON.stringify({ error: "Notes directory not found: " + NOTES_DIR }));
+    console.log(
+      JSON.stringify({
+        error: "Notes directory not found: " + NOTES_DIR,
+        completedTodayCount: 0,
+      }),
+    );
     return;
   }
 
   const files = walk(NOTES_DIR);
   if (!files.length) {
-    console.log(JSON.stringify({ error: "No .md files found under: " + NOTES_DIR }));
+    console.log(
+      JSON.stringify({
+        error: "No .md files found under: " + NOTES_DIR,
+        completedTodayCount: 0,
+      }),
+    );
     return;
   }
 
   const candidates = [];
+  let completedTodayCount = 0;
   for (const file of files) {
     let text;
     try {
@@ -104,7 +118,19 @@ function main() {
       continue;
     }
 
-    if (isEligibleForQaWidget(text)) continue;
+    if (isEligibleForQaWidget(text)) {
+      let stats;
+      try {
+        stats = fs.statSync(file);
+      } catch {
+        stats = null;
+      }
+
+      if (stats && isDateToday(stats.mtime)) {
+        completedTodayCount += 1;
+      }
+      continue;
+    }
 
     const base = path.basename(file);
     candidates.push({
@@ -119,6 +145,7 @@ function main() {
       JSON.stringify({
         error: NO_INELIGIBLE_NOTES_ERROR,
         candidateCount: 0,
+        completedTodayCount,
         totalMarkdownFiles: files.length,
         refreshedAt: Date.now(),
       }),
@@ -132,6 +159,7 @@ function main() {
     JSON.stringify({
       selected,
       candidateCount: candidates.length,
+      completedTodayCount,
       totalMarkdownFiles: files.length,
       refreshedAt: Date.now(),
     }),
@@ -224,6 +252,7 @@ const parseCommandOutput = (output) => {
       isNoCandidates: false,
       raw,
       candidateCount: 0,
+      completedTodayCount: 0,
       totalMarkdownFiles: 0,
     };
   }
@@ -238,6 +267,7 @@ const parseCommandOutput = (output) => {
       isNoCandidates: false,
       raw,
       candidateCount: 0,
+      completedTodayCount: 0,
       totalMarkdownFiles: 0,
     };
   }
@@ -249,11 +279,13 @@ const parseCommandOutput = (output) => {
       isNoCandidates: false,
       raw,
       candidateCount: 0,
+      completedTodayCount: 0,
       totalMarkdownFiles: 0,
     };
   }
 
   const candidateCount = normalizeWholeNumber(parsed.candidateCount, 0);
+  const completedTodayCount = normalizeWholeNumber(parsed.completedTodayCount, 0);
   const totalMarkdownFiles = normalizeWholeNumber(parsed.totalMarkdownFiles, 0);
   const refreshedAt =
     parsed.refreshedAt === null || parsed.refreshedAt === undefined
@@ -268,6 +300,7 @@ const parseCommandOutput = (output) => {
       isNoCandidates: errorText === NO_INELIGIBLE_NOTES_ERROR,
       raw: "",
       candidateCount,
+      completedTodayCount,
       totalMarkdownFiles,
       refreshedAt: Number.isFinite(refreshedAt) ? refreshedAt : null,
     };
@@ -284,6 +317,7 @@ const parseCommandOutput = (output) => {
       isNoCandidates: false,
       raw,
       candidateCount,
+      completedTodayCount,
       totalMarkdownFiles,
     };
   }
@@ -299,6 +333,7 @@ const parseCommandOutput = (output) => {
       isNoCandidates: false,
       raw,
       candidateCount,
+      completedTodayCount,
       totalMarkdownFiles,
     };
   }
@@ -311,6 +346,7 @@ const parseCommandOutput = (output) => {
     ok: true,
     selected: { topic, file, path },
     candidateCount: candidateCount > 0 ? candidateCount : 1,
+    completedTodayCount,
     totalMarkdownFiles,
     refreshedAt: Number.isFinite(refreshedAt) ? refreshedAt : null,
     error: null,
@@ -447,7 +483,14 @@ export const render = ({ output, error, refreshing }, dispatch) => {
         ) : null}
 
         {!error && parsed.ok ? (
-          <div className="meta">{parsed.candidateCount} notes remain</div>
+          <div className="meta">
+            <div className="metaItem metaItemLeft">
+              <strong>{parsed.candidateCount}</strong> notes
+            </div>
+            <div className="metaItem metaItemRight">
+              <strong>{parsed.completedTodayCount}</strong> completed today
+            </div>
+          </div>
         ) : null}
       </div>
     </div>
@@ -537,10 +580,25 @@ export const className = `
   }
 
   .meta {
-  text-align: center;
     margin-top: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     font-size: 12px;
     opacity: 0.72;
+  }
+
+  .metaItem {
+    min-width: 0;
+  }
+
+  .metaItemLeft {
+    text-align: left;
+  }
+
+  .metaItemRight {
+    text-align: right;
   }
 
   .loading {

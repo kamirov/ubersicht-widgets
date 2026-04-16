@@ -4,7 +4,7 @@ export const refreshFrequency = false;
 
 const NODE = "/Users/kamirov/.nvm/versions/node/v22.17.1/bin/node";
 const NOTES_DIR =
-  "/Users/kamirov/Documents/The Source";
+  "/Users/kamirov/Documents/The Destination/👨‍⚕️ Medicine/Exploring";
 const SETTINGS_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/openai-settings.json";
 const PENDING_QUESTIONS_STORE =
@@ -42,14 +42,38 @@ function shuffle(arr) {
   return arr;
 }
 
-function extractSection(text, header) {
-  const esc = header.replace(/[.*+?^()[\\]{}|\\\\]/g, "\\\\$&");
-  const re = new RegExp("^##\\\\s+" + esc + "\\\\s*$([\\\\s\\\\S]*?)(?=^##\\\\s+|\\\\Z)", "m");
-  const m = text.match(re);
-  if (!m) return "";
-  let section = m[1] || "";
-  section = section.replace(/^\\s*\\n+/, "").replace(/\\n+\\s*$/, "");
-  return section.trim();
+function normalizeHeadingLabel(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function extractSection(text, headers) {
+  const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
+  const lines = normalized.split("\\n");
+  const targets = new Set(
+    (Array.isArray(headers) ? headers : [headers]).map(normalizeHeadingLabel),
+  );
+
+  let start = -1;
+  let end = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed.startsWith("#")) continue;
+
+    const sectionName = normalizeHeadingLabel(trimmed.replace(/^#+\\s*/, ""));
+    if (start === -1) {
+      if (targets.has(sectionName)) start = i + 1;
+      continue;
+    }
+
+    end = i;
+    break;
+  }
+
+  if (start === -1) return "";
+  return lines.slice(start, end).join("\\n").trim();
 }
 
 function splitNumberedList(sectionText) {
@@ -91,8 +115,8 @@ function main() {
     try { text = fs.readFileSync(file, "utf8"); }
     catch { continue; }
 
-    const qSection = extractSection(text, "Questions");
-    const aSection = extractSection(text, "Answers");
+    const qSection = extractSection(text, ["Question", "Questions"]);
+    const aSection = extractSection(text, ["Answer", "Answers"]);
     if (!qSection || !aSection) continue;
 
     const qs = splitNumberedList(qSection);
@@ -126,37 +150,15 @@ function main() {
 
   shuffle(candidates);
   const easy = candidates[0];
-  const medium =
-    candidates.find((candidate) => candidate.path !== easy.path) || easy;
-  const hard =
-    candidates.find(
-      (candidate) =>
-        candidate.path !== easy.path && candidate.path !== medium.path,
-    ) ||
-    candidates.find((candidate) => candidate.path !== medium.path) ||
-    candidates.find((candidate) => candidate.path !== easy.path) ||
-    medium ||
-    easy;
-  const distinctPathCount = new Set(
-    [easy.path, medium.path, hard.path].filter(Boolean),
-  ).size;
-  const warning =
-    distinctPathCount < 3
-      ? "Only found " +
-        String(distinctPathCount) +
-        " distinct parseable note topic" +
-        (distinctPathCount === 1 ? "" : "s") +
-        "; reusing topic context across easy, medium, and hard modes."
-      : null;
 
   console.log(
     JSON.stringify({
       contexts: [
         { mode: "easy", ...easy },
-        { mode: "medium", ...medium },
-        { mode: "hard", ...hard },
+        { mode: "medium", ...easy },
+        { mode: "hard", ...easy },
       ],
-      warning,
+      warning: null,
     }),
   );
 }
@@ -1628,6 +1630,23 @@ const makeTopicKey = (mode, context) => {
   return `${safeMode}::${path}::${topic}`;
 };
 
+const getCachedTopicContextForMode = (baseState, mode) => {
+  const safeMode = normalizeModeKey(mode);
+  if (!safeMode) return null;
+  const cachedEntry =
+    baseState &&
+    baseState.cachedQuestionByMode &&
+    baseState.cachedQuestionByMode[safeMode] &&
+    typeof baseState.cachedQuestionByMode[safeMode] === "object"
+      ? baseState.cachedQuestionByMode[safeMode]
+      : null;
+  const topicContext =
+    cachedEntry && typeof cachedEntry === "object"
+      ? normalizeTopicContext(cachedEntry.topicContext)
+      : null;
+  return topicContext || null;
+};
+
 const scheduleGenerationForContexts = (baseState, payload) => {
   const payloadContexts = payload && payload.contexts ? payload.contexts : null;
   if (
@@ -1653,14 +1672,15 @@ const scheduleGenerationForContexts = (baseState, payload) => {
   const cacheLoaded = !!baseState.cacheLoaded;
   const wrongTopicLoaded = !!baseState.wrongTopicLoaded;
   if (!cacheLoaded || !wrongTopicLoaded) {
+    const fallbackEasyContext = payloadContexts.easy;
     return {
       ...baseState,
       activeMode: DEFAULT_MODE,
       topicContextByMode: {
         targeted: null,
-        easy: payloadContexts.easy,
-        medium: payloadContexts.medium,
-        hard: payloadContexts.hard,
+        easy: fallbackEasyContext,
+        medium: fallbackEasyContext,
+        hard: fallbackEasyContext,
       },
       loadingByMode: emptyLoadingByMode(),
       errorByMode: emptyErrorByMode(),
@@ -1678,11 +1698,13 @@ const scheduleGenerationForContexts = (baseState, payload) => {
         wrongTopicCounts[pickedTargetedTopic],
       )
     : null;
+  const easyContextFromCache = getCachedTopicContextForMode(baseState, "easy");
+  const easyContext = easyContextFromCache || payloadContexts.easy || null;
   const contexts = {
     targeted: targetedContext,
-    easy: payloadContexts.easy,
-    medium: payloadContexts.medium,
-    hard: payloadContexts.hard,
+    easy: easyContext,
+    medium: easyContext,
+    hard: easyContext,
   };
 
   const hasApiKey =

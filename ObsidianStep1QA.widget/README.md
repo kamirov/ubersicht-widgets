@@ -48,6 +48,7 @@ Behavior:
 
 - If `targeted`, `easy`, `medium`, or `hard` already has an unanswered cached question, that mode is not regenerated.
 - New generation happens only for mode(s) missing from the cache.
+- `easy` is the canonical topic for the standard modes. If `easy` is cached and `medium` or `hard` is missing, the missing mode regenerates using `easy`'s cached topic context.
 - Selecting an answer marks that mode as answered and removes it from cache.
 - This applies to both automatic refreshes and manual `🔄` refresh.
 - If cache JSON is malformed, the widget shows a warning and continues with empty-cache behavior.
@@ -87,6 +88,7 @@ The widget includes four difficulty buttons:
 - `🐣` medium
 - `🐓` hard
 
+- `easy`, `medium`, and `hard` all use the same topic context, anchored to the current `easy` topic.
 - Targeted mode chooses a topic from `wrong-topic-counts.json`.
 - Topic selection is weighted by count value (`higher count => higher chance`).
 - Targeted questions use medium-style difficulty behavior.
@@ -95,8 +97,9 @@ The widget includes four difficulty buttons:
 
 ## Usage
 
-- Click `🔄` to pull fresh note contexts and regenerate only missing mode(s).
+- Click `🔄` to pull a fresh `easy` topic context and regenerate only missing mode(s).
 - Unanswered cached mode(s) are preserved on both automatic and manual refresh.
+- If `medium` or `hard` is missing but `easy` is still unanswered, the missing mode regenerates on `easy`'s topic.
 - Click `💬` to ask ChatGPT about the current internal topic context.
 - Select an answer choice to reveal:
   - Correct choice highlighted in faint green
