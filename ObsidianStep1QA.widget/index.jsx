@@ -7,10 +7,6 @@ const NOTES_DIR =
   "/Users/kamirov/Documents/The Destination/👨‍⚕️ Medicine/Exploring";
 const SETTINGS_STORE =
   "/Users/kamirov/Projects/ubersicht-widgets/openai-settings.json";
-const PENDING_QUESTIONS_STORE =
-  "/Users/kamirov/Projects/ubersicht-widgets/ObsidianStep1QA.widget/pending-questions.json";
-const WRONG_TOPIC_COUNTS_STORE =
-  "/Users/kamirov/Projects/ubersicht-widgets/ObsidianStep1QA.widget/wrong-topic-counts.json";
 
 export const command = `
 "${NODE}" <<'EOF'
@@ -97,6 +93,46 @@ function splitNumberedList(sectionText) {
   return items;
 }
 
+function makeTopicTextPreview(text) {
+  const normalized = String(text || "").replace(/\\r\\n/g, "\\n");
+  const lines = normalized
+    .split("\\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+  const preview = lines.join("\\n").trim();
+  return preview ? preview.slice(0, 900) : "";
+}
+
+function pickDistinctContexts(candidates, modes) {
+  const pool = Array.isArray(candidates) ? candidates.slice() : [];
+  const requestedModes = Array.isArray(modes) ? modes : [];
+  if (!pool.length || !requestedModes.length) return [];
+
+  const chosen = [];
+  const usedTopicKeys = new Set();
+
+  for (const mode of requestedModes) {
+    let candidateIndex = pool.findIndex((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const key = [entry.path || "", entry.topic || ""].join("::");
+      return key && !usedTopicKeys.has(key);
+    });
+
+    if (candidateIndex < 0) candidateIndex = chosen.length % pool.length;
+
+    const candidate = pool[candidateIndex];
+    if (!candidate) continue;
+
+    const key = [candidate.path || "", candidate.topic || ""].join("::");
+    if (key) usedTopicKeys.add(key);
+
+    chosen.push({ mode, ...candidate });
+  }
+
+  return chosen;
+}
+
 function main() {
   if (!fs.existsSync(NOTES_DIR)) {
     console.log(JSON.stringify({ error: "Notes directory not found: " + NOTES_DIR }));
@@ -137,13 +173,15 @@ function main() {
       questionsCount: qs.length,
       answersCount: as.length,
       samplePairs,
+      topicTextPreview: makeTopicTextPreview(text),
+      sourceType: "note",
     });
   }
 
   if (!candidates.length) {
     console.log(JSON.stringify({
       error:
-        "Need at least one parseable note file with numbered Questions/Answers to generate question modes.",
+        "Need at least one parseable note file with numbered Questions/Answers to generate a question.",
     }));
     return;
   }
@@ -153,11 +191,7 @@ function main() {
 
   console.log(
     JSON.stringify({
-      contexts: [
-        { mode: "easy", ...easy },
-        { mode: "medium", ...easy },
-        { mode: "hard", ...easy },
-      ],
+      contexts: [{ mode: "easy", ...easy }],
       warning: null,
     }),
   );
@@ -167,7 +201,7 @@ main();
 EOF
 `;
 
-const AUTO_REFRESH_TARGET_MINUTE = 59;
+const AUTO_REFRESH_INTERVAL_MS = 1000 * 60 * 15;
 const autoRefreshState = {
   started: false,
   timerId: null,
@@ -181,18 +215,8 @@ const clearAutoRefreshTimer = () => {
   }
 };
 
-const getMillisecondsUntilNextAutoRefresh = (now = new Date()) => {
-  const next = new Date(now.getTime());
-  next.setSeconds(0, 0);
-  next.setMinutes(AUTO_REFRESH_TARGET_MINUTE);
-  if (next.getTime() <= now.getTime()) {
-    next.setHours(next.getHours() + 1);
-  }
-  return Math.max(0, next.getTime() - now.getTime());
-};
-
 const triggerAutoRefresh = (dispatch) => {
-  dispatch({ type: "REFRESH_CLICKED" });
+  dispatch({ type: "AUTO_REFRESH_TICK" });
 };
 
 const scheduleNextAutoRefresh = () => {
@@ -203,7 +227,7 @@ const scheduleNextAutoRefresh = () => {
     autoRefreshState.timerId = null;
     triggerAutoRefresh(autoRefreshState.dispatch);
     scheduleNextAutoRefresh();
-  }, getMillisecondsUntilNextAutoRefresh());
+  }, AUTO_REFRESH_INTERVAL_MS);
 };
 
 const ensureAutoRefresh = (dispatch) => {
@@ -223,26 +247,116 @@ const ensureAutoRefresh = (dispatch) => {
 const escapeForSingleQuotedShell = (value) =>
   String(value).replace(/'/g, "'\\''");
 
-const QUESTION_MODES = ["targeted", "easy", "medium", "hard"];
+// Multi-mode support is temporarily collapsed to a single easy question.
+const QUESTION_MODES = ["easy"];
 const QUESTION_DIFFICULTIES = ["easy", "medium", "hard"];
 const CHOICE_KEYS = ["A", "B", "C", "D", "E"];
+const TOPIC_NATURES = [
+  "disease",
+  "drug",
+  "organism",
+  "anatomy",
+  "physiology_process",
+  "molecular_biology",
+  "pathology_finding",
+  "symptom_sign",
+  "lab_or_measurement",
+  "treatment_or_procedure",
+  "gene_or_mutation",
+  "developmental_embryology",
+  "immune_concept",
+  "histology_structure",
+  "broad_concept",
+];
+const TOPIC_ROLES = [
+  "hidden_diagnosis",
+  "tested_mechanism",
+  "drug_mechanism",
+  "drug_indication",
+  "drug_adverse_effect",
+  "complication",
+  "risk_factor",
+  "pathogenesis",
+  "histologic_correlate",
+  "genetic_basis",
+  "physiologic_principle",
+  "lab_interpretation_target",
+  "anatomic_localization",
+  "clue_only",
+];
+const QUESTION_ARCHETYPES = [
+  "diagnosis_from_vignette",
+  "mechanism_after_diagnosis",
+  "drug_selection",
+  "drug_mechanism",
+  "adverse_effect",
+  "complication",
+  "genetic_basis",
+  "lab_interpretation",
+  "anatomic_localization",
+  "histology_identification",
+  "physiology_prediction",
+];
+const STEM_TOPIC_USAGES = ["answer", "tested_concept", "clue_only"];
+const VIGNETTE_STYLES = [
+  "classic",
+  "integrated_lab",
+  "pathology",
+  "pharmacology",
+];
 const DEFAULT_MODE = "easy";
-const CURRENT_PENDING_QUESTIONS_VERSION = 2;
-const LEGACY_CACHED_DIFFICULTY_BY_MODE = {
-  targeted: "hard",
-  easy: "easy",
-  medium: "medium",
-  hard: "hard",
-};
-const EMPTY_PENDING_QUESTION_STORE = {
-  version: CURRENT_PENDING_QUESTIONS_VERSION,
-  questions: {
-    targeted: null,
-    easy: null,
-    medium: null,
-    hard: null,
-  },
-};
+const ANALYSIS_CACHE_TTL_MS = 1000 * 60 * 30;
+
+/**
+ * @typedef {"disease"|"drug"|"organism"|"anatomy"|"physiology_process"|"molecular_biology"|"pathology_finding"|"symptom_sign"|"lab_or_measurement"|"treatment_or_procedure"|"gene_or_mutation"|"developmental_embryology"|"immune_concept"|"histology_structure"|"broad_concept"} TopicNature
+ * @typedef {"hidden_diagnosis"|"tested_mechanism"|"drug_mechanism"|"drug_indication"|"drug_adverse_effect"|"complication"|"risk_factor"|"pathogenesis"|"histologic_correlate"|"genetic_basis"|"physiologic_principle"|"lab_interpretation_target"|"anatomic_localization"|"clue_only"} TopicRole
+ * @typedef {"diagnosis_from_vignette"|"mechanism_after_diagnosis"|"drug_selection"|"drug_mechanism"|"adverse_effect"|"complication"|"genetic_basis"|"lab_interpretation"|"anatomic_localization"|"histology_identification"|"physiology_prediction"} QuestionArchetype
+ *
+ * @typedef {{
+ *   canonicalTopic: string,
+ *   nature: TopicNature,
+ *   confidence: number,
+ *   appropriateRoles: TopicRole[],
+ *   preferredArchetypes: QuestionArchetype[],
+ *   distractorFamily: string,
+ *   systems: string[],
+ *   avoid: string[],
+ *   reasoningNotes: string[],
+ * }} TopicAnalysis
+ *
+ * @typedef {{
+ *   chosenRole: TopicRole,
+ *   chosenArchetype: QuestionArchetype,
+ *   testedConcept: string,
+ *   stemStrategy: {
+ *     topicUsage: "answer"|"tested_concept"|"clue_only",
+ *     shouldHideTopicName: boolean,
+ *   },
+ *   reasoningChain: string[],
+ *   vignetteStyle: "classic"|"integrated_lab"|"pathology"|"pharmacology",
+ *   distractorStrategy: string,
+ *   difficulty: "easy"|"medium"|"hard",
+ * }} QuestionPlan
+ *
+ * @typedef {{
+ *   stem: string,
+ *   choices: { key: "A"|"B"|"C"|"D"|"E", text: string, explanation: string }[],
+ *   correctKey: "A"|"B"|"C"|"D"|"E",
+ *   correctExplanation: string,
+ *   metadata: {
+ *     testedConcept: string,
+ *     archetype: QuestionArchetype,
+ *     nature: TopicNature,
+ *     reasoningSteps: number,
+ *   },
+ * }} GeneratedQuestion
+ *
+ * @typedef {{
+ *   valid: boolean,
+ *   issues: string[],
+ *   repairedQuestion?: GeneratedQuestion|null,
+ * }} ValidationResult
+ */
 
 const DIFFICULTY_PROMPT_BLOCKS = {
   easy: `Easy
@@ -337,14 +451,8 @@ const DIFFICULTY_CONTROL_DIMENSIONS = `Difficulty control dimensions
 - Data interpretation: Easy = minimal, Medium = moderate, Hard = substantial.
 - Stem density: Easy = concise, Medium = moderate detail, Hard = dense and complex.`;
 
+// Medium/hard profiles are intentionally kept for an eventual multi-mode restore.
 const DIFFICULTY_PROFILES = {
-  targeted: {
-    label: "targeted",
-    title: "Targeted",
-    emoji: "🎯",
-    promptMode: "medium",
-    difficulty: "medium",
-  },
   easy: {
     label: "easy",
     title: "Easy",
@@ -370,8 +478,6 @@ const DIFFICULTY_PROFILES = {
 
 const scheduledGenerationRequests = new Set();
 const scheduledRefreshRequests = new Set();
-const scheduledCacheMutationRequests = new Set();
-const scheduledWrongTopicMutationRequests = new Set();
 const OPENAI_TIMEOUT_MS = 60000;
 
 const normalizeModeKey = (mode) => {
@@ -411,125 +517,6 @@ const makeModeMap = (valueFactory) => {
   return out;
 };
 
-const normalizeWrongTopicKey = (topic) => {
-  const normalized = typeof topic === "string" ? topic.trim() : "";
-  return normalized || "Unknown topic";
-};
-
-const normalizeWrongTopicCounts = (input) => {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
-  const out = {};
-  for (const [rawTopic, rawCount] of Object.entries(input)) {
-    const topic = normalizeWrongTopicKey(rawTopic);
-    const count = Number(rawCount);
-    if (!Number.isFinite(count) || count < 0) continue;
-    const normalizedCount = Math.floor(count);
-    if (normalizedCount <= 0) continue;
-    out[topic] = (out[topic] || 0) + normalizedCount;
-  }
-  return out;
-};
-
-const pickWeightedTopic = (counts) => {
-  const normalized = normalizeWrongTopicCounts(counts);
-  const entries = Object.entries(normalized).filter(
-    ([topic, count]) => !!topic && Number.isFinite(count) && count > 0,
-  );
-  if (!entries.length) return "";
-
-  let total = 0;
-  for (const [, count] of entries) total += count;
-  if (!Number.isFinite(total) || total <= 0) return "";
-
-  let roll = Math.random() * total;
-  for (const [topic, count] of entries) {
-    roll -= count;
-    if (roll < 0) return topic;
-  }
-  return entries[entries.length - 1][0] || "";
-};
-
-const makeTargetedContextFromTopic = (topic, count) => {
-  const safeTopic = normalizeWrongTopicKey(topic);
-  const safeCount = Number.isFinite(Number(count))
-    ? Math.max(1, Math.floor(Number(count)))
-    : 1;
-  return {
-    topic: safeTopic,
-    file: "wrong-topic-counts.json",
-    path: WRONG_TOPIC_COUNTS_STORE,
-    questionsCount: safeCount,
-    answersCount: safeCount,
-    samplePairs: [],
-  };
-};
-
-const normalizeQuestion = (input) => {
-  if (!input || typeof input !== "object") {
-    return { question: null, error: "Model response is not an object." };
-  }
-
-  const stem = typeof input.stem === "string" ? input.stem.trim() : "";
-  const correctKey = normalizeChoiceKey(input.correctKey);
-  const correctExplanation =
-    typeof input.correctExplanation === "string"
-      ? input.correctExplanation.trim()
-      : "";
-  const choicesRaw = Array.isArray(input.choices) ? input.choices : [];
-
-  if (!stem) return { question: null, error: "Question stem is missing." };
-  if (!correctKey)
-    return { question: null, error: "Correct answer key is invalid." };
-  if (!correctExplanation) {
-    return { question: null, error: "Correct answer explanation is missing." };
-  }
-  if (choicesRaw.length !== 5) {
-    return { question: null, error: "Expected exactly 5 answer choices." };
-  }
-
-  const seen = new Set();
-  const choices = [];
-  for (const entry of choicesRaw) {
-    const key = normalizeChoiceKey(entry && entry.key);
-    const text =
-      typeof (entry && entry.text) === "string" ? entry.text.trim() : "";
-    const explanation =
-      typeof (entry && entry.explanation) === "string"
-        ? entry.explanation.trim()
-        : "";
-
-    if (!key) return { question: null, error: "Choice key must be A-E." };
-    if (seen.has(key))
-      return { question: null, error: "Choice keys must be unique." };
-    if (!text)
-      return { question: null, error: `Choice ${key} is missing text.` };
-    if (!explanation) {
-      return { question: null, error: `Choice ${key} is missing explanation.` };
-    }
-
-    seen.add(key);
-    choices.push({ key, text, explanation });
-  }
-
-  for (const key of CHOICE_KEYS) {
-    if (!seen.has(key)) {
-      return { question: null, error: `Missing choice ${key}.` };
-    }
-  }
-
-  choices.sort((a, b) => a.key.localeCompare(b.key));
-
-  return {
-    question: {
-      stem,
-      choices,
-      correctKey,
-      correctExplanation,
-    },
-    error: null,
-  };
-};
-
 const normalizeSamplePair = (pair) => {
   if (!pair || typeof pair !== "object") return null;
   const q = typeof pair.q === "string" ? pair.q.trim() : "";
@@ -545,6 +532,14 @@ const normalizeTopicContext = (entry) => {
   const path = typeof entry.path === "string" ? entry.path.trim() : "";
   const questionsCount = Number(entry.questionsCount);
   const answersCount = Number(entry.answersCount);
+  const topicTextPreview =
+    typeof entry.topicTextPreview === "string"
+      ? entry.topicTextPreview.trim()
+      : "";
+  const sourceType =
+    entry.sourceType === "note" || entry.sourceType === "wrong-topic"
+      ? entry.sourceType
+      : undefined;
 
   const rawPairs = Array.isArray(entry.samplePairs) ? entry.samplePairs : [];
   const samplePairs = rawPairs
@@ -564,6 +559,8 @@ const normalizeTopicContext = (entry) => {
     questionsCount,
     answersCount,
     samplePairs,
+    ...(topicTextPreview ? { topicTextPreview } : {}),
+    ...(sourceType ? { sourceType } : {}),
   };
 };
 
@@ -599,7 +596,7 @@ const parseCommandPayload = (rawOutput) => {
     contexts[context.mode] = context;
   }
 
-  if (!contexts.easy || !contexts.medium || !contexts.hard) return null;
+  if (!contexts.easy) return null;
 
   const warning =
     typeof parsed.warning === "string" && parsed.warning.trim()
@@ -654,7 +651,257 @@ const randomizeQuestionChoices = (question) => {
   };
 };
 
-const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
+const analysisCacheByTopicKey = new Map();
+
+const GENERATED_QUESTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    stem: { type: "string" },
+    choices: {
+      type: "array",
+      minItems: 5,
+      maxItems: 5,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          key: { type: "string", enum: CHOICE_KEYS },
+          text: { type: "string" },
+          explanation: { type: "string" },
+        },
+        required: ["key", "text", "explanation"],
+      },
+    },
+    correctKey: { type: "string", enum: CHOICE_KEYS },
+    correctExplanation: { type: "string" },
+    metadata: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        testedConcept: { type: "string" },
+        archetype: { type: "string", enum: QUESTION_ARCHETYPES },
+        nature: { type: "string", enum: TOPIC_NATURES },
+        reasoningSteps: { type: "number" },
+      },
+      required: ["testedConcept", "archetype", "nature", "reasoningSteps"],
+    },
+  },
+  required: [
+    "stem",
+    "choices",
+    "correctKey",
+    "correctExplanation",
+    "metadata",
+  ],
+};
+
+const TOPIC_ANALYSIS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    canonicalTopic: { type: "string" },
+    nature: { type: "string", enum: TOPIC_NATURES },
+    confidence: { type: "number" },
+    appropriateRoles: {
+      type: "array",
+      items: { type: "string", enum: TOPIC_ROLES },
+    },
+    preferredArchetypes: {
+      type: "array",
+      items: { type: "string", enum: QUESTION_ARCHETYPES },
+    },
+    distractorFamily: { type: "string" },
+    systems: {
+      type: "array",
+      items: { type: "string" },
+    },
+    avoid: {
+      type: "array",
+      items: { type: "string" },
+    },
+    reasoningNotes: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+  required: [
+    "canonicalTopic",
+    "nature",
+    "confidence",
+    "appropriateRoles",
+    "preferredArchetypes",
+    "distractorFamily",
+    "systems",
+    "avoid",
+    "reasoningNotes",
+  ],
+};
+
+const QUESTION_PLAN_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    chosenRole: { type: "string", enum: TOPIC_ROLES },
+    chosenArchetype: { type: "string", enum: QUESTION_ARCHETYPES },
+    testedConcept: { type: "string" },
+    stemStrategy: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        topicUsage: { type: "string", enum: STEM_TOPIC_USAGES },
+        shouldHideTopicName: { type: "boolean" },
+      },
+      required: ["topicUsage", "shouldHideTopicName"],
+    },
+    reasoningChain: {
+      type: "array",
+      items: { type: "string" },
+    },
+    vignetteStyle: { type: "string", enum: VIGNETTE_STYLES },
+    distractorStrategy: { type: "string" },
+    difficulty: { type: "string", enum: QUESTION_DIFFICULTIES },
+  },
+  required: [
+    "chosenRole",
+    "chosenArchetype",
+    "testedConcept",
+    "stemStrategy",
+    "reasoningChain",
+    "vignetteStyle",
+    "distractorStrategy",
+    "difficulty",
+  ],
+};
+
+const VALIDATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    valid: { type: "boolean" },
+    issues: {
+      type: "array",
+      items: { type: "string" },
+    },
+    repairedQuestion: {
+      anyOf: [GENERATED_QUESTION_SCHEMA, { type: "null" }],
+    },
+  },
+  required: ["valid", "issues", "repairedQuestion"],
+};
+
+const normalizeNonEmptyString = (value) =>
+  typeof value === "string" ? value.trim() : "";
+
+const normalizeStringArray = (value, { maxItems = 12 } = {}) => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of value) {
+    const normalized = normalizeNonEmptyString(entry);
+    const key = normalized.toLowerCase();
+    if (!normalized || seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+};
+
+const normalizeEnumArray = (value, allowed, { maxItems = 8 } = {}) => {
+  if (!Array.isArray(value)) return [];
+  const allowedSet = new Set(allowed);
+  const seen = new Set();
+  const out = [];
+  for (const entry of value) {
+    const normalized = normalizeNonEmptyString(entry);
+    if (!allowedSet.has(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+};
+
+const removeLeadingReasoningPrefix = (value) =>
+  normalizeNonEmptyString(value).replace(
+    /^(step\s*\d+[:.)-]?\s*|reasoning\s*step\s*\d+[:.)-]?\s*)/i,
+    "",
+  );
+
+const normalizeComparisonString = (value) =>
+  normalizeNonEmptyString(value)
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const compactReasoningChain = (reasoningChain, { testedConcept, analysis } = {}) => {
+  const normalizedTestedConcept = normalizeComparisonString(testedConcept);
+  const normalizedCanonicalTopic = normalizeComparisonString(
+    analysis && analysis.canonicalTopic,
+  );
+  const compacted = [];
+  const seen = new Set();
+
+  for (const rawStep of Array.isArray(reasoningChain) ? reasoningChain : []) {
+    const cleaned = removeLeadingReasoningPrefix(rawStep);
+    const normalized = normalizeComparisonString(cleaned);
+    if (!normalized || seen.has(normalized)) continue;
+
+    const isBareTopicRestatement =
+      normalizedCanonicalTopic &&
+      (normalized === normalizedCanonicalTopic ||
+        normalized === `identify ${normalizedCanonicalTopic}` ||
+        normalized === `recognize ${normalizedCanonicalTopic}` ||
+        normalized === `diagnose ${normalizedCanonicalTopic}`);
+
+    const isBareTestedConceptRestatement =
+      normalizedTestedConcept &&
+      (normalized === normalizedTestedConcept ||
+        normalized === `test ${normalizedTestedConcept}` ||
+        normalized === `ask about ${normalizedTestedConcept}` ||
+        normalized === `determine ${normalizedTestedConcept}`);
+
+    if (isBareTopicRestatement || isBareTestedConceptRestatement) continue;
+
+    seen.add(normalized);
+    compacted.push(cleaned);
+  }
+
+  return compacted;
+};
+
+const summarizeTopicContext = (topicContext) => {
+  const context = topicContext && typeof topicContext === "object" ? topicContext : {};
+  const samplePairs = Array.isArray(context.samplePairs)
+    ? context.samplePairs.slice(0, 3)
+    : [];
+  const noteExamples = samplePairs.length
+    ? samplePairs
+        .map(
+          (pair, index) =>
+            `${index + 1}. Q: ${pair.q}\n   A: ${pair.a}`,
+        )
+        .join("\n")
+    : "No sample Q/A pairs available.";
+  const preview = normalizeNonEmptyString(context.topicTextPreview);
+  const sourceType =
+    context.sourceType === "note" || context.sourceType === "wrong-topic"
+      ? context.sourceType
+      : "note";
+
+  return [
+    `Topic: ${normalizeNonEmptyString(context.topic) || "Unknown topic"}`,
+    `Source type: ${sourceType}`,
+    `Source file: ${normalizeNonEmptyString(context.file) || "Unknown file"}`,
+    `Source path: ${normalizeNonEmptyString(context.path) || "Unknown path"}`,
+    `Question count in note: ${Number.isFinite(Number(context.questionsCount)) ? Number(context.questionsCount) : 0}`,
+    `Answer count in note: ${Number.isFinite(Number(context.answersCount)) ? Number(context.answersCount) : 0}`,
+    preview ? `Topic preview:\n${preview}` : "Topic preview: None available.",
+    `Sample note Q/A pairs:\n${noteExamples}`,
+  ].join("\n\n");
+};
+
+const getPromptSettings = ({ mode, difficultyProfile }) => {
   const safeMode = normalizeModeKey(mode) || DEFAULT_MODE;
   const profile =
     difficultyProfile && typeof difficultyProfile === "object"
@@ -669,106 +916,669 @@ const buildPromptMessages = ({ mode, topicContext, difficultyProfile }) => {
   const difficultyBlock =
     DIFFICULTY_PROMPT_BLOCKS[promptDifficulty] ||
     DIFFICULTY_PROMPT_BLOCKS.easy;
-  const contextData =
-    topicContext && typeof topicContext === "object" ? topicContext : {};
-  const cleanedPairs = Array.isArray(contextData.samplePairs)
-    ? contextData.samplePairs.slice(0, 3)
-    : [];
+  return { safeMode, promptMode, promptDifficulty, difficultyBlock };
+};
 
+const isReasoningStepsCompatible = (difficulty, reasoningSteps) => {
+  const steps = Number(reasoningSteps);
+  if (!Number.isFinite(steps) || steps <= 0) return false;
+  if (difficulty === "easy") return steps <= 2;
+  if (difficulty === "medium") return steps >= 2 && steps <= 3;
+  if (difficulty === "hard") return steps >= 3;
+  return true;
+};
+
+const isArchetypeCompatibleWithNature = (nature, archetype) => {
+  const normalizedNature = normalizeNonEmptyString(nature);
+  const normalizedArchetype = normalizeNonEmptyString(archetype);
+  if (!normalizedNature || !normalizedArchetype) return false;
+
+  // Light sanity checks only; the LLM prompts remain the primary selector.
+  switch (normalizedNature) {
+    case "drug":
+      return [
+        "drug_selection",
+        "drug_mechanism",
+        "adverse_effect",
+        "mechanism_after_diagnosis",
+        "complication",
+        "diagnosis_from_vignette",
+      ].includes(normalizedArchetype);
+    case "disease":
+    case "organism":
+    case "broad_concept":
+      return [
+        "diagnosis_from_vignette",
+        "mechanism_after_diagnosis",
+        "complication",
+        "lab_interpretation",
+        "physiology_prediction",
+        "histology_identification",
+        "genetic_basis",
+      ].includes(normalizedArchetype);
+    case "anatomy":
+    case "developmental_embryology":
+      return [
+        "anatomic_localization",
+        "diagnosis_from_vignette",
+        "physiology_prediction",
+        "mechanism_after_diagnosis",
+        "lab_interpretation",
+      ].includes(normalizedArchetype);
+    case "histology_structure":
+    case "pathology_finding":
+      return [
+        "histology_identification",
+        "diagnosis_from_vignette",
+        "mechanism_after_diagnosis",
+        "complication",
+        "lab_interpretation",
+        "physiology_prediction",
+      ].includes(normalizedArchetype);
+    case "lab_or_measurement":
+    case "physiology_process":
+      return [
+        "lab_interpretation",
+        "physiology_prediction",
+        "mechanism_after_diagnosis",
+        "diagnosis_from_vignette",
+        "complication",
+      ].includes(normalizedArchetype);
+    case "gene_or_mutation":
+    case "molecular_biology":
+    case "immune_concept":
+      return [
+        "genetic_basis",
+        "mechanism_after_diagnosis",
+        "physiology_prediction",
+        "lab_interpretation",
+        "complication",
+        "diagnosis_from_vignette",
+      ].includes(normalizedArchetype);
+    case "symptom_sign":
+      return [
+        "diagnosis_from_vignette",
+        "anatomic_localization",
+        "lab_interpretation",
+        "physiology_prediction",
+        "mechanism_after_diagnosis",
+      ].includes(normalizedArchetype);
+    case "treatment_or_procedure":
+      return [
+        "drug_selection",
+        "adverse_effect",
+        "complication",
+        "mechanism_after_diagnosis",
+        "diagnosis_from_vignette",
+      ].includes(normalizedArchetype);
+    default:
+      return QUESTION_ARCHETYPES.includes(normalizedArchetype);
+  }
+};
+
+const normalizeChoiceFingerprint = (text) =>
+  normalizeNonEmptyString(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ");
+
+const normalizeTopicAnalysis = (input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { analysis: null, error: "Topic analysis is not an object." };
+  }
+
+  const canonicalTopic = normalizeNonEmptyString(input.canonicalTopic);
+  const nature = normalizeNonEmptyString(input.nature);
+  const confidence = Number(input.confidence);
+  const appropriateRoles = normalizeEnumArray(input.appropriateRoles, TOPIC_ROLES);
+  const preferredArchetypes = normalizeEnumArray(
+    input.preferredArchetypes,
+    QUESTION_ARCHETYPES,
+  );
+  const distractorFamily = normalizeNonEmptyString(input.distractorFamily);
+  const systems = normalizeStringArray(input.systems);
+  const avoid = normalizeStringArray(input.avoid);
+  const reasoningNotes = normalizeStringArray(input.reasoningNotes);
+
+  if (!canonicalTopic) {
+    return { analysis: null, error: "Topic analysis canonicalTopic is missing." };
+  }
+  if (!TOPIC_NATURES.includes(nature)) {
+    return { analysis: null, error: "Topic analysis nature is invalid." };
+  }
+  if (!Number.isFinite(confidence)) {
+    return { analysis: null, error: "Topic analysis confidence is invalid." };
+  }
+  if (!appropriateRoles.length) {
+    return { analysis: null, error: "Topic analysis appropriateRoles is empty." };
+  }
+  if (!preferredArchetypes.length) {
+    return {
+      analysis: null,
+      error: "Topic analysis preferredArchetypes is empty.",
+    };
+  }
+  if (!distractorFamily) {
+    return {
+      analysis: null,
+      error: "Topic analysis distractorFamily is missing.",
+    };
+  }
+
+  return {
+    analysis: {
+      canonicalTopic,
+      nature,
+      confidence: Math.max(0, Math.min(1, confidence)),
+      appropriateRoles,
+      preferredArchetypes,
+      distractorFamily,
+      systems,
+      avoid,
+      reasoningNotes,
+    },
+    error: null,
+  };
+};
+
+const normalizeQuestionPlan = (input, { analysis } = {}) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { plan: null, error: "Question plan is not an object." };
+  }
+
+  const chosenRole = normalizeNonEmptyString(input.chosenRole);
+  const chosenArchetype = normalizeNonEmptyString(input.chosenArchetype);
+  const testedConcept = normalizeNonEmptyString(input.testedConcept);
+  const stemStrategy =
+    input.stemStrategy && typeof input.stemStrategy === "object"
+      ? input.stemStrategy
+      : null;
+  const topicUsage = normalizeNonEmptyString(stemStrategy && stemStrategy.topicUsage);
+  const shouldHideTopicName =
+    stemStrategy && typeof stemStrategy.shouldHideTopicName === "boolean"
+      ? stemStrategy.shouldHideTopicName
+      : null;
+  const reasoningChainRaw = normalizeStringArray(input.reasoningChain, {
+    maxItems: 8,
+  });
+  const reasoningChain = compactReasoningChain(reasoningChainRaw, {
+    testedConcept,
+    analysis,
+  });
+  const vignetteStyle = normalizeNonEmptyString(input.vignetteStyle);
+  const distractorStrategy = normalizeNonEmptyString(input.distractorStrategy);
+  const difficulty = normalizeDifficultyKey(input.difficulty);
+
+  if (!TOPIC_ROLES.includes(chosenRole)) {
+    return { plan: null, error: "Question plan chosenRole is invalid." };
+  }
+  if (!QUESTION_ARCHETYPES.includes(chosenArchetype)) {
+    return { plan: null, error: "Question plan chosenArchetype is invalid." };
+  }
+  if (!testedConcept) {
+    return { plan: null, error: "Question plan testedConcept is missing." };
+  }
+  if (!STEM_TOPIC_USAGES.includes(topicUsage)) {
+    return { plan: null, error: "Question plan topicUsage is invalid." };
+  }
+  if (typeof shouldHideTopicName !== "boolean") {
+    return {
+      plan: null,
+      error: "Question plan shouldHideTopicName is invalid.",
+    };
+  }
+  if (!reasoningChain.length) {
+    return { plan: null, error: "Question plan reasoningChain is empty." };
+  }
+  if (!VIGNETTE_STYLES.includes(vignetteStyle)) {
+    return { plan: null, error: "Question plan vignetteStyle is invalid." };
+  }
+  if (!distractorStrategy) {
+    return {
+      plan: null,
+      error: "Question plan distractorStrategy is missing.",
+    };
+  }
+  if (!difficulty) {
+    return { plan: null, error: "Question plan difficulty is invalid." };
+  }
+  if (!isReasoningStepsCompatible(difficulty, reasoningChain.length)) {
+    return {
+      plan: null,
+      error: `Question plan reasoning depth does not match ${difficulty} difficulty after normalization (steps=${reasoningChain.length}; chain=${JSON.stringify(reasoningChain)}).`,
+    };
+  }
+  if (analysis && Array.isArray(analysis.appropriateRoles)) {
+    const roleAllowed = analysis.appropriateRoles.includes(chosenRole);
+    if (!roleAllowed) {
+      return {
+        plan: null,
+        error: "Question plan chose a role outside topic analysis guidance.",
+      };
+    }
+  }
+  if (analysis && Array.isArray(analysis.preferredArchetypes)) {
+    const archetypeAllowed = analysis.preferredArchetypes.includes(chosenArchetype);
+    if (!archetypeAllowed) {
+      return {
+        plan: null,
+        error:
+          `Question plan chose an archetype outside topic analysis guidance (nature=${analysis.nature}; preferred=${JSON.stringify(analysis.preferredArchetypes)}; chosen=${JSON.stringify(chosenArchetype)}).`,
+      };
+    }
+  }
+
+  return {
+    plan: {
+      chosenRole,
+      chosenArchetype,
+      testedConcept,
+      stemStrategy: {
+        topicUsage,
+        shouldHideTopicName,
+      },
+      reasoningChain,
+      vignetteStyle,
+      distractorStrategy,
+      difficulty,
+    },
+    error: null,
+  };
+};
+
+const normalizeGeneratedQuestion = (
+  input,
+  { difficulty, analysis, plan, topicContext } = {},
+) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { question: null, error: "Generated question is not an object." };
+  }
+
+  const stem = normalizeNonEmptyString(input.stem);
+  const correctKey = normalizeChoiceKey(input.correctKey);
+  const correctExplanation = normalizeNonEmptyString(input.correctExplanation);
+  const choicesRaw = Array.isArray(input.choices) ? input.choices : [];
+  const metadata =
+    input.metadata && typeof input.metadata === "object" ? input.metadata : null;
+
+  if (!stem) return { question: null, error: "Question stem is missing." };
+  if (!correctKey) {
+    return { question: null, error: "Correct answer key is invalid." };
+  }
+  if (!correctExplanation) {
+    return {
+      question: null,
+      error: "Correct answer explanation is missing.",
+    };
+  }
+  if (choicesRaw.length !== 5) {
+    return { question: null, error: "Expected exactly 5 answer choices." };
+  }
+  if (!metadata) {
+    return { question: null, error: "Question metadata is missing." };
+  }
+
+  const seenKeys = new Set();
+  const seenChoiceFingerprints = new Set();
+  const choices = [];
+  for (const entry of choicesRaw) {
+    const key = normalizeChoiceKey(entry && entry.key);
+    const text = normalizeNonEmptyString(entry && entry.text);
+    const explanation = normalizeNonEmptyString(entry && entry.explanation);
+    const fingerprint = normalizeChoiceFingerprint(text);
+
+    if (!key) return { question: null, error: "Choice key must be A-E." };
+    if (seenKeys.has(key)) {
+      return { question: null, error: "Choice keys must be unique." };
+    }
+    if (!text) {
+      return { question: null, error: `Choice ${key} is missing text.` };
+    }
+    if (!explanation) {
+      return {
+        question: null,
+        error: `Choice ${key} is missing explanation.`,
+      };
+    }
+    if (!fingerprint || seenChoiceFingerprints.has(fingerprint)) {
+      return {
+        question: null,
+        error: "Choice texts must be distinct and non-duplicate.",
+      };
+    }
+
+    seenKeys.add(key);
+    seenChoiceFingerprints.add(fingerprint);
+    choices.push({ key, text, explanation });
+  }
+
+  for (const key of CHOICE_KEYS) {
+    if (!seenKeys.has(key)) {
+      return { question: null, error: `Missing choice ${key}.` };
+    }
+  }
+
+  const metadataTestedConcept = normalizeNonEmptyString(metadata.testedConcept);
+  const metadataArchetype = normalizeNonEmptyString(metadata.archetype);
+  const metadataNature = normalizeNonEmptyString(metadata.nature);
+  const metadataReasoningSteps = Math.round(Number(metadata.reasoningSteps));
+
+  if (!metadataTestedConcept) {
+    return { question: null, error: "Question metadata.testedConcept is missing." };
+  }
+  if (!QUESTION_ARCHETYPES.includes(metadataArchetype)) {
+    return { question: null, error: "Question metadata.archetype is invalid." };
+  }
+  if (!TOPIC_NATURES.includes(metadataNature)) {
+    return { question: null, error: "Question metadata.nature is invalid." };
+  }
+  if (
+    !Number.isFinite(metadataReasoningSteps) ||
+    metadataReasoningSteps <= 0
+  ) {
+    return {
+      question: null,
+      error: "Question metadata.reasoningSteps is invalid.",
+    };
+  }
+
+  if (difficulty && !isReasoningStepsCompatible(difficulty, metadataReasoningSteps)) {
+    return {
+      question: null,
+      error: `Question reasoning depth does not match ${difficulty} difficulty.`,
+    };
+  }
+  if (analysis && metadataNature !== analysis.nature) {
+    return {
+      question: null,
+      error: "Question metadata nature drifted from topic analysis.",
+    };
+  }
+  if (analysis && !isArchetypeCompatibleWithNature(analysis.nature, metadataArchetype)) {
+    return {
+      question: null,
+      error: "Question archetype is incompatible with topic nature.",
+    };
+  }
+  if (plan && metadataArchetype !== plan.chosenArchetype) {
+    return {
+      question: null,
+      error: "Question metadata archetype drifted from the plan.",
+    };
+  }
+  if (plan && plan.stemStrategy && plan.stemStrategy.shouldHideTopicName) {
+    const topicText =
+      topicContext && typeof topicContext === "object" ? topicContext.topic : "";
+    if (
+      normalizeComparisonString(topicText) &&
+      normalizeComparisonString(stem).includes(normalizeComparisonString(topicText))
+    ) {
+      return {
+        question: null,
+        error: "Question stem exposed the topic name despite a hidden-topic plan.",
+      };
+    }
+  }
+
+  choices.sort((a, b) => a.key.localeCompare(b.key));
+
+  return {
+    question: {
+      stem,
+      choices,
+      correctKey,
+      correctExplanation,
+      metadata: {
+        testedConcept: metadataTestedConcept,
+        archetype: metadataArchetype,
+        nature: metadataNature,
+        reasoningSteps: metadataReasoningSteps,
+      },
+    },
+    error: null,
+  };
+};
+
+const normalizeQuestion = (input, options = {}) =>
+  normalizeGeneratedQuestion(input, options);
+
+const normalizeValidationResult = (
+  input,
+  { difficulty, analysis, plan, topicContext, requireRepair = false } = {},
+) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { validation: null, error: "Validation result is not an object." };
+  }
+
+  const valid = typeof input.valid === "boolean" ? input.valid : null;
+  const issues = normalizeStringArray(input.issues, { maxItems: 12 });
+  const repairedQuestionInput =
+    Object.prototype.hasOwnProperty.call(input, "repairedQuestion")
+      ? input.repairedQuestion
+      : undefined;
+
+  if (typeof valid !== "boolean") {
+    return { validation: null, error: "Validation result valid flag is invalid." };
+  }
+
+  let repairedQuestion = null;
+  if (repairedQuestionInput !== null && typeof repairedQuestionInput !== "undefined") {
+    const normalizedRepaired = normalizeGeneratedQuestion(repairedQuestionInput, {
+      difficulty,
+      analysis,
+      plan,
+      topicContext,
+    });
+    if (!normalizedRepaired.question) {
+      return {
+        validation: null,
+        error:
+          normalizedRepaired.error ||
+          "Validation repairedQuestion has invalid shape.",
+      };
+    }
+    repairedQuestion = normalizedRepaired.question;
+  }
+
+  if (!valid && requireRepair && !repairedQuestion) {
+    return {
+      validation: null,
+      error: "Validation rejected the question without providing a repair.",
+    };
+  }
+
+  return {
+    validation: {
+      valid,
+      issues,
+      repairedQuestion,
+    },
+    error: null,
+  };
+};
+
+const buildTopicAnalysisMessages = ({ topicContext, difficultyProfile, mode }) => {
+  const { safeMode, promptDifficulty } = getPromptSettings({
+    mode,
+    difficultyProfile,
+  });
   const systemMessage =
-    "You create rigorous USMLE Step 1 single-best-answer questions. Return only valid JSON.";
-
-  const noteExamples = cleanedPairs.length
-    ? cleanedPairs
-        .map(
-          (pair, index) =>
-            `${index + 1}. Q: ${pair.q}\n   A: ${pair.a}`,
-        )
-        .join("\n")
-    : "No sample Q/A pairs available for this topic.";
-
+    "You are the topic-analysis stage of a USMLE Step 1 question pipeline. Return only valid JSON.";
   const userMessage = `Widget mode: ${safeMode.toUpperCase()}
-Question difficulty: ${promptDifficulty.toUpperCase()}
-Topic: ${contextData.topic}
+Requested difficulty: ${promptDifficulty.toUpperCase()}
 
-You are generating a single USMLE Step 1-style multiple-choice question.
+${summarizeTopicContext(topicContext)}
 
-The item should resemble the style of Step 1: clinically grounded when appropriate, mechanism-focused, and designed to test applied understanding rather than simple recall.
+Task:
+- Infer what kind of entity the topic is from the topic name plus any note preview and sample note Q/A pairs.
+- Infer how it should function best in a USMLE Step 1 item.
+- Given the topic, infer whether it should function best as the hidden answer, the tested concept, or a clue inside the vignette. Prefer indirect testing when appropriate.
+- Do not overfit the analysis to a single difficulty; identify the genuinely appropriate roles and archetypes that later planning could adapt across easy, medium, and hard variants.
+- Avoid pure definition-style questions unless the topic and requested difficulty strongly support it.
+- Output only roles and archetypes that are genuinely appropriate for this topic.
 
-Return JSON with this exact shape:
-{
-  "stem": "string",
-  "choices": [
-    { "key": "A", "text": "string", "explanation": "string" },
-    { "key": "B", "text": "string", "explanation": "string" },
-    { "key": "C", "text": "string", "explanation": "string" },
-    { "key": "D", "text": "string", "explanation": "string" },
-    { "key": "E", "text": "string", "explanation": "string" }
-  ],
-  "correctKey": "A|B|C|D|E",
-  "correctExplanation": "string"
-}
+Analysis expectations:
+- Choose one TopicNature.
+- appropriateRoles should contain only realistic ways the topic can be used.
+- preferredArchetypes should prioritize the most Step 1-like item styles for this topic.
+- distractorFamily should describe what family the answer choices should come from.
+- systems should identify relevant organ systems or disciplines.
+- avoid should list obvious bad directions or common low-quality question styles to avoid.
+- reasoningNotes should capture concise internal justifications for later planning.
 
-Rules:
-- Exactly five choices A-E.
-- Exactly one correct answer.
-- Output valid JSON only.
-- Do not include markdown fences or extra text outside JSON.
-- Escape quotation marks correctly so the output is valid JSON.
+Return JSON only.`;
 
-Topic grounding:
-- Stay tightly focused on the topic above.
-- Use the sample note material when helpful, but write a fresh question rather than copying it.
-- Sample note Q/A pairs:
-${noteExamples}
+  return { systemMessage, userMessage };
+};
 
-Step 1 style requirements:
-- Prefer a clinical vignette when the topic supports it.
-- Use patient age, sex, presentation, relevant history, physical exam, labs, imaging, pathology, or pharmacology only when they meaningfully contribute to reasoning.
-- Match the reasoning depth and integration level to the requested difficulty exactly.
-- Focus on mechanisms, pathophysiology, pharmacology, microbiology, immunology, genetics, biochemistry, physiology, and pathology in an integrated way.
-- Avoid pure trivia and avoid isolated fact recall unless the requested difficulty explicitly allows it.
-- Avoid buzzword stacking and avoid making the diagnosis or answer too obvious from a single clue unless the requested difficulty is easy.
-- Do not write stems that simply ask for a definition unless the requested difficulty is easy.
-- Internally decide what the question is primarily testing: mechanism, diagnosis, pathology, pharmacology, microbiology, immunology, genetics, physiology, or biochemistry, and keep the item tightly focused on that.
+const buildQuestionPlanMessages = ({
+  topicContext,
+  difficultyProfile,
+  analysis,
+  mode,
+}) => {
+  const { safeMode, promptDifficulty, difficultyBlock } = getPromptSettings({
+    mode,
+    difficultyProfile,
+  });
+  const systemMessage =
+    "You are the planning stage of a USMLE Step 1 question pipeline. Return only valid JSON.";
+  const userMessage = `Widget mode: ${safeMode.toUpperCase()}
+Requested difficulty: ${promptDifficulty.toUpperCase()}
 
-Stem quality requirements:
-- Make the stem concise but information-dense.
-- Include enough information to discriminate among close answer choices.
-- Keep the stem less cue-heavy and avoid obvious giveaway language.
-- Use natural Step-style phrasing such as asking for the most likely mechanism, enzyme, receptor, mediator, organism feature, pathologic change, or downstream consequence.
-- Do not use negative phrasing like EXCEPT or NOT.
-- Avoid vague stems where multiple answers could be arguably correct.
-- The stem must contain at least one discriminating clue that rules out the strongest distractor.
+${summarizeTopicContext(topicContext)}
 
-Choice quality requirements:
-- All answer choices must belong to the same conceptual category whenever possible.
-- Distractors must be plausible and closely related to the correct answer.
-- Wrong answers should reflect common confusions, adjacent mechanisms, similar diseases, related organisms, nearby pathways, or drugs with overlapping uses or effects.
-- Do not include obviously wrong answers, joke answers, or choices whose wording or length gives away the correct answer.
-- The correct answer may be any key A-E; do not bias toward one position.
+Topic analysis:
+${JSON.stringify(analysis, null, 2)}
 
-Explanation requirements:
-- "correctExplanation" should briefly explain why the correct answer is right, referencing the key discriminating clues and the underlying mechanism.
-- Each choice "explanation" should briefly explain why that option is wrong in this vignette or why it is less likely than the correct answer.
-- Keep explanations concise, specific, high-yield, and mechanistic.
-- Do not merely restate the answer choice.
+Task:
+- Choose the single best archetype for the requested difficulty.
+- Choose the single best role for the topic.
+- Choose the tested concept that should actually be assessed.
+- Choose whether the topic should act as the hidden answer, the tested concept, or a clue only.
+- Choose the most Step 1-like archetype for this topic and difficulty. The topic should not be named in the stem unless directly necessary.
 
-Topic-specific content guidance:
-- When appropriate, ask about mechanism of action, adverse effect, resistance mechanism, toxin effect, virulence factor, signaling pathway, enzyme deficiency, inheritance pattern, histologic finding, receptor effect, compensatory physiologic response, or biochemical consequence.
-
-Difficulty requirements:
-- Use ${promptDifficulty.toUpperCase()} difficulty for this item.
-- Apply this exact rubric:
+Difficulty control:
 ${difficultyBlock}
-- ${DIFFICULTY_CONTROL_DIMENSIONS}
-- Keep the stem, distractors, integration level, and reasoning chain aligned with ${promptDifficulty.toUpperCase()} rather than drifting easier or harder.
+${DIFFICULTY_CONTROL_DIMENSIONS}
 
-Quality control before finalizing:
-- Ensure only one answer is unambiguously correct.
-- Ensure the vignette supports the correct answer better than any distractor.
-- Ensure the item feels like a Step 1 preparation question rather than a basic classroom quiz.
-- Ensure the answer can be solved from the information in the stem plus standard foundational medical knowledge.`;
+Planning requirements:
+- Easy must be 1 step, or at most 2 only when the second step is a trivial bridge.
+- Medium should usually be 2-step.
+- Hard should be 3+ steps and more integrated.
+- Hard may use integrated archetypes that cross disease, mechanism, lab, physiology, histology, or genetics boundaries when they remain Step 1-like and keep distractors in the same conceptual family.
+- The topic name should usually NOT appear in the stem unless the role is adverse-effect or direct pharmacology after treatment.
+- Distractors must stay in the same family.
+- Keep reasoningChain concise and explicitly sequenced.
+- reasoningChain must contain only the essential scored inference steps, not setup details, stem facts, diagnosis labels, or restatements of the tested concept.
+- For easy, return a reasoningChain array of length 1, or 2 only if absolutely necessary.
+- stemStrategy.shouldHideTopicName should usually be true when the topic is the hidden answer or tested concept.
+
+Return JSON only.`;
+
+  return { systemMessage, userMessage };
+};
+
+const buildQuestionGenerationMessages = ({
+  topicContext,
+  difficultyProfile,
+  analysis,
+  plan,
+  mode,
+}) => {
+  const { safeMode, promptDifficulty, difficultyBlock } = getPromptSettings({
+    mode,
+    difficultyProfile,
+  });
+  const systemMessage =
+    "You are the generation stage of a USMLE Step 1 question pipeline. Return only valid JSON.";
+  const userMessage = `Widget mode: ${safeMode.toUpperCase()}
+Requested difficulty: ${promptDifficulty.toUpperCase()}
+
+${summarizeTopicContext(topicContext)}
+
+Topic analysis:
+${JSON.stringify(analysis, null, 2)}
+
+Question plan:
+${JSON.stringify(plan, null, 2)}
+
+Task:
+- Generate a clinical item that tests the topic through reasoning, not a direct definition.
+- Generate from the plan, not directly from the raw topic.
+- If plan.stemStrategy.topicUsage is "answer", the stem should lead to the topic as the hidden diagnosis or answer.
+- If plan.stemStrategy.topicUsage is "tested_concept", the stem should lead to a scenario and then ask about mechanism, pathway, target, or downstream concept.
+- If plan.stemStrategy.topicUsage is "clue_only", the topic should appear only as a clue, not as the answer.
+
+Output requirements:
+- Exactly five choices A-E.
+- One best answer only.
+- Keep all answer choices in the same conceptual category.
+- Include at least one discriminating clue that defeats the strongest distractor.
+- No EXCEPT or NOT questions.
+- Make the item feel like Step 1 rather than a classroom definition quiz.
+- metadata.testedConcept must match the plan.
+- metadata.archetype must match the plan.
+- metadata.nature must match the analysis nature.
+- metadata.reasoningSteps should reflect the plan complexity.
+
+Difficulty control:
+${difficultyBlock}
+${DIFFICULTY_CONTROL_DIMENSIONS}
+
+Return JSON only.`;
+
+  return { systemMessage, userMessage };
+};
+
+const buildQuestionValidationMessages = ({
+  topicContext,
+  difficultyProfile,
+  analysis,
+  plan,
+  question,
+  mode,
+}) => {
+  const { safeMode, promptDifficulty, difficultyBlock } = getPromptSettings({
+    mode,
+    difficultyProfile,
+  });
+  const systemMessage =
+    "You are the validation-and-repair stage of a USMLE Step 1 question pipeline. Return only valid JSON.";
+  const userMessage = `Widget mode: ${safeMode.toUpperCase()}
+Requested difficulty: ${promptDifficulty.toUpperCase()}
+
+${summarizeTopicContext(topicContext)}
+
+Topic analysis:
+${JSON.stringify(analysis, null, 2)}
+
+Question plan:
+${JSON.stringify(plan, null, 2)}
+
+Generated question:
+${JSON.stringify(question, null, 2)}
+
+Validation checklist:
+- Is there only one best answer?
+- Are distractors in the same family and plausible?
+- Is the stem solvable from the clues?
+- Does the item match requested difficulty?
+- Does it feel like Step 1 rather than a classroom definition quiz?
+- Is the topic hidden, tested, or clue-used appropriately?
+- Reject questions where the answer is obvious from a single buzzword or where distractors are cross-category.
+
+Repair requirements:
+- If the question is valid, return valid=true, issues as a concise list, and repairedQuestion=null.
+- If the question is invalid, repair it and return repairedQuestion in full GeneratedQuestion shape.
+- Preserve the core topic, plan intent, same-family distractor strategy, and requested difficulty.
+- Do not introduce negative phrasing such as EXCEPT or NOT.
+
+Difficulty control:
+${difficultyBlock}
+${DIFFICULTY_CONTROL_DIMENSIONS}
+
+Return JSON only.`;
 
   return { systemMessage, userMessage };
 };
@@ -826,100 +1636,245 @@ const extractResponseText = (data) => {
 
   return fragments.join("\n").trim();
 };
+const callResponsesJson = async ({
+  apiKey,
+  schemaName,
+  schema,
+  messages,
+  model = "gpt-5-mini",
+}) => {
+  let timeoutId = null;
+  try {
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        input: (Array.isArray(messages) ? messages : []).map((message) => ({
+          role: message.role,
+          content: [{ type: "input_text", text: message.text }],
+        })),
+        text: {
+          format: {
+            type: "json_schema",
+            name: schemaName,
+            schema,
+            strict: true,
+          },
+        },
+      }),
+    });
 
-const emptyCachedByMode = () => makeModeMap(() => null);
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `OpenAI request failed (${response.status}): ${body.slice(0, 300)}`,
+      );
+    }
 
-const resolveCachedDifficulty = ({ mode, entry, version }) => {
-  const explicitDifficulty = normalizeDifficultyKey(entry && entry.difficulty);
-  if (explicitDifficulty) return explicitDifficulty;
-  if (Number(version) === 1) {
-    return normalizeDifficultyKey(LEGACY_CACHED_DIFFICULTY_BY_MODE[mode]);
+    const data = await response.json();
+    const text = extractResponseText(data);
+    const json = extractJsonFromText(text);
+    if (!json) {
+      throw new Error("OpenAI returned non-JSON content.");
+    }
+    return json;
+  } catch (err) {
+    const isTimeout =
+      err && typeof err === "object" && err.name === "AbortError";
+    if (isTimeout) {
+      throw new Error(
+        `OpenAI request timed out after ${Math.round(OPENAI_TIMEOUT_MS / 1000)}s.`,
+      );
+    }
+    throw err;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
   }
-  return "";
 };
 
-const parsePendingQuestionsStore = (rawOutput) => {
-  let parsed;
-  try {
-    parsed = JSON.parse((rawOutput || "").trim());
-  } catch {
-    return {
-      cachedQuestionByMode: emptyCachedByMode(),
-      warning:
-        "Pending question cache file is malformed JSON. Ignoring cached questions.",
-    };
+const analyzeTopic = async ({ apiKey, mode, difficultyProfile, topicContext }) => {
+  const { systemMessage, userMessage } = buildTopicAnalysisMessages({
+    mode,
+    difficultyProfile,
+    topicContext,
+  });
+  const json = await callResponsesJson({
+    apiKey,
+    schemaName: "step1_topic_analysis",
+    schema: TOPIC_ANALYSIS_SCHEMA,
+    messages: [
+      { role: "system", text: systemMessage },
+      { role: "user", text: userMessage },
+    ],
+  });
+  const normalized = normalizeTopicAnalysis(json);
+  if (!normalized.analysis) {
+    throw new Error(normalized.error || "Topic analysis schema was invalid.");
+  }
+  return normalized.analysis;
+};
+
+const planQuestion = async ({
+  apiKey,
+  mode,
+  difficultyProfile,
+  topicContext,
+  analysis,
+}) => {
+  const { systemMessage, userMessage } = buildQuestionPlanMessages({
+    mode,
+    difficultyProfile,
+    topicContext,
+    analysis,
+  });
+  const json = await callResponsesJson({
+    apiKey,
+    schemaName: "step1_question_plan",
+    schema: QUESTION_PLAN_SCHEMA,
+    messages: [
+      { role: "system", text: systemMessage },
+      { role: "user", text: userMessage },
+    ],
+  });
+  const normalized = normalizeQuestionPlan(json, { analysis });
+  if (!normalized.plan) {
+    throw new Error(normalized.error || "Question plan schema was invalid.");
+  }
+  return normalized.plan;
+};
+
+const generateQuestionFromPlan = async ({
+  apiKey,
+  mode,
+  difficultyProfile,
+  topicContext,
+  analysis,
+  plan,
+}) => {
+  const { systemMessage, userMessage } = buildQuestionGenerationMessages({
+    mode,
+    difficultyProfile,
+    topicContext,
+    analysis,
+    plan,
+  });
+  const json = await callResponsesJson({
+    apiKey,
+    schemaName: "step1_generated_question",
+    schema: GENERATED_QUESTION_SCHEMA,
+    messages: [
+      { role: "system", text: systemMessage },
+      { role: "user", text: userMessage },
+    ],
+  });
+  const normalized = normalizeGeneratedQuestion(json, {
+    difficulty: plan && plan.difficulty,
+    analysis,
+    plan,
+    topicContext,
+  });
+  if (!normalized.question) {
+    throw new Error(
+      normalized.error || "Generated question schema was invalid.",
+    );
+  }
+  return normalized.question;
+};
+
+const validateOrRepairQuestion = async ({
+  apiKey,
+  mode,
+  difficultyProfile,
+  topicContext,
+  analysis,
+  plan,
+  question,
+}) => {
+  const { systemMessage, userMessage } = buildQuestionValidationMessages({
+    mode,
+    difficultyProfile,
+    topicContext,
+    analysis,
+    plan,
+    question,
+  });
+  const json = await callResponsesJson({
+    apiKey,
+    schemaName: "step1_validation_result",
+    schema: VALIDATION_SCHEMA,
+    messages: [
+      { role: "system", text: systemMessage },
+      { role: "user", text: userMessage },
+    ],
+  });
+  const normalized = normalizeValidationResult(json, {
+    difficulty: plan && plan.difficulty,
+    analysis,
+    plan,
+    topicContext,
+    requireRepair: true,
+  });
+  if (!normalized.validation) {
+    throw new Error(
+      normalized.error || "Validation result schema was invalid.",
+    );
+  }
+  return normalized.validation;
+};
+
+const getMemoizedTopicAnalysis = async ({
+  apiKey,
+  mode,
+  difficultyProfile,
+  topicContext,
+  topicKey,
+}) => {
+  const cacheKey = normalizeNonEmptyString(topicKey);
+  if (!cacheKey) {
+    return analyzeTopic({ apiKey, mode, difficultyProfile, topicContext });
   }
 
-  const version = Number(parsed && parsed.version);
+  const now = Date.now();
+  const existing = analysisCacheByTopicKey.get(cacheKey);
   if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    ![1, CURRENT_PENDING_QUESTIONS_VERSION].includes(version)
+    existing &&
+    existing.analysis &&
+    Number.isFinite(existing.savedAt) &&
+    now - existing.savedAt <= ANALYSIS_CACHE_TTL_MS
   ) {
-    return {
-      cachedQuestionByMode: emptyCachedByMode(),
-      warning:
-        "Pending question cache schema is invalid. Ignoring cached questions.",
-    };
+    return existing.analysis;
+  }
+  if (existing && existing.promise) {
+    return existing.promise;
   }
 
-  const questions =
-    parsed.questions && typeof parsed.questions === "object"
-      ? parsed.questions
-      : null;
-  if (!questions) {
-    return {
-      cachedQuestionByMode: emptyCachedByMode(),
-      warning:
-        "Pending question cache is missing `questions`. Ignoring cached questions.",
-    };
-  }
+  const promise = analyzeTopic({
+    apiKey,
+    mode,
+    difficultyProfile,
+    topicContext,
+  })
+    .then((analysis) => {
+      analysisCacheByTopicKey.set(cacheKey, {
+        analysis,
+        savedAt: Date.now(),
+      });
+      return analysis;
+    })
+    .catch((err) => {
+      analysisCacheByTopicKey.delete(cacheKey);
+      throw err;
+    });
 
-  const cachedQuestionByMode = emptyCachedByMode();
-  const invalidModes = [];
-  for (const mode of QUESTION_MODES) {
-    const entry = questions[mode];
-    if (entry === null || typeof entry === "undefined") continue;
-    if (!entry || typeof entry !== "object") {
-      invalidModes.push(mode);
-      continue;
-    }
-
-    const normalized = normalizeQuestion(entry.question);
-    const topicContext = normalizeTopicContext(entry.topicContext);
-    const savedAt =
-      typeof entry.savedAt === "string" && entry.savedAt.trim()
-        ? entry.savedAt.trim()
-        : "";
-    const difficulty = resolveCachedDifficulty({ mode, entry, version });
-    const expectedDifficulty = getDifficultyForMode(mode);
-
-    if (
-      !normalized.question ||
-      !topicContext ||
-      !savedAt ||
-      !Number.isFinite(Date.parse(savedAt)) ||
-      !difficulty ||
-      difficulty !== expectedDifficulty
-    ) {
-      invalidModes.push(mode);
-      continue;
-    }
-
-    cachedQuestionByMode[mode] = {
-      question: normalized.question,
-      topicContext,
-      savedAt,
-      difficulty,
-    };
-  }
-
-  const warning =
-    invalidModes.length > 0
-      ? `Pending question cache had invalid entry for: ${invalidModes.join(", ")}. Ignoring those mode(s).`
-      : null;
-
-  return { cachedQuestionByMode, warning };
+  analysisCacheByTopicKey.set(cacheKey, { promise, savedAt: now });
+  return promise;
 };
 
 const loadApiKey = (dispatch) => {
@@ -1015,571 +1970,88 @@ main();
     });
 };
 
-const loadPendingQuestionsCache = (dispatch) => {
-  const nodeScript = `
-const fs = require("fs");
-
-const STORE = '${escapeForSingleQuotedShell(PENDING_QUESTIONS_STORE)}';
-
-function main() {
-  if (!fs.existsSync(STORE)) {
-    console.log(JSON.stringify({
-      ok: true,
-      exists: false,
-      raw: ${JSON.stringify(JSON.stringify(EMPTY_PENDING_QUESTION_STORE))},
-      warning: null,
-    }));
-    return;
-  }
-
-  let raw;
-  try {
-    raw = fs.readFileSync(STORE, "utf8");
-  } catch (err) {
-    console.log(JSON.stringify({
-      ok: false,
-      error: "Could not read pending question cache: " + String(err && err.message ? err.message : err),
-    }));
-    return;
-  }
-
-  console.log(JSON.stringify({ ok: true, exists: true, raw, warning: null }));
-}
-
-main();
-`;
-
-  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
-    .then((result) => {
-      try {
-        const data = JSON.parse(String(result || "").trim());
-        if (!data || !data.ok || typeof data.raw !== "string") {
-          dispatch({
-            type: "LOAD_CACHE_RESULT",
-            ok: false,
-            cachedQuestionByMode: emptyCachedByMode(),
-            warning: null,
-            error: String(
-              (data && data.error) || "Could not load pending question cache.",
-            ),
-          });
-          return;
-        }
-
-        const parsed = parsePendingQuestionsStore(data.raw);
-        dispatch({
-          type: "LOAD_CACHE_RESULT",
-          ok: true,
-          cachedQuestionByMode: parsed.cachedQuestionByMode,
-          warning:
-            parsed.warning ||
-            (typeof data.warning === "string" ? data.warning : null),
-          error: null,
-        });
-      } catch {
-        dispatch({
-          type: "LOAD_CACHE_RESULT",
-          ok: false,
-          cachedQuestionByMode: emptyCachedByMode(),
-          warning: null,
-          error: "Could not parse pending question cache load response.",
-        });
-      }
-    })
-    .catch((err) => {
-      dispatch({
-        type: "LOAD_CACHE_RESULT",
-        ok: false,
-        cachedQuestionByMode: emptyCachedByMode(),
-        warning: null,
-        error: `Pending question cache load failed: ${String(err && err.message ? err.message : err)}`,
-      });
-    });
-};
-
-const persistPendingQuestionForMode = ({ mode, cachedEntry }, dispatch) => {
-  const safeMode = normalizeModeKey(mode);
-  if (!safeMode) return;
-
-  const payload = cachedEntry
-    ? {
-        difficulty: getDifficultyForMode(safeMode),
-        question: cachedEntry.question,
-        topicContext: cachedEntry.topicContext,
-        savedAt:
-          typeof cachedEntry.savedAt === "string" && cachedEntry.savedAt.trim()
-            ? cachedEntry.savedAt.trim()
-            : new Date().toISOString(),
-      }
-    : null;
-
-  const nodeScript = `
-const fs = require("fs");
-const path = require("path");
-
-const STORE = '${escapeForSingleQuotedShell(PENDING_QUESTIONS_STORE)}';
-const MODE = ${JSON.stringify(safeMode)};
-const ENTRY = ${JSON.stringify(payload)};
-const EMPTY_STORE = ${JSON.stringify(EMPTY_PENDING_QUESTION_STORE)};
-const CURRENT_VERSION = ${JSON.stringify(CURRENT_PENDING_QUESTIONS_VERSION)};
-const EXPECTED_DIFFICULTY_BY_MODE = ${JSON.stringify({
-    targeted: getDifficultyForMode("targeted"),
-    easy: getDifficultyForMode("easy"),
-    medium: getDifficultyForMode("medium"),
-    hard: getDifficultyForMode("hard"),
-  })};
-const LEGACY_DIFFICULTY_BY_MODE = ${JSON.stringify(
-    LEGACY_CACHED_DIFFICULTY_BY_MODE,
-  )};
-
-function cloneEmptyStore() {
-  return JSON.parse(JSON.stringify(EMPTY_STORE));
-}
-
-function normalizeEntry(mode, entry, version) {
-  if (entry === null || typeof entry === "undefined") return null;
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
-
-  const explicitDifficulty =
-    typeof entry.difficulty === "string"
-      ? entry.difficulty.trim().toLowerCase()
-      : "";
-  const legacyDifficulty =
-    Number(version) === 1
-      ? String(LEGACY_DIFFICULTY_BY_MODE[mode] || "").trim().toLowerCase()
-      : "";
-  const difficulty = explicitDifficulty || legacyDifficulty;
-  if (!difficulty || difficulty !== EXPECTED_DIFFICULTY_BY_MODE[mode]) {
-    return null;
-  }
-
-  return {
-    ...entry,
-    difficulty,
-  };
-}
-
-function readCurrentStore() {
-  if (!fs.existsSync(STORE)) {
-    return cloneEmptyStore();
-  }
-
-  try {
-    const raw = fs.readFileSync(STORE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      [1, CURRENT_VERSION].includes(Number(parsed.version)) &&
-      parsed.questions &&
-      typeof parsed.questions === "object"
-    ) {
-      const version = Number(parsed.version);
-      return {
-        version: CURRENT_VERSION,
-        questions: {
-          targeted: normalizeEntry("targeted", parsed.questions.targeted, version),
-          easy: normalizeEntry("easy", parsed.questions.easy, version),
-          medium: normalizeEntry("medium", parsed.questions.medium, version),
-          hard: normalizeEntry("hard", parsed.questions.hard, version),
-        },
-      };
-    }
-  } catch {
-    return cloneEmptyStore();
-  }
-
-  return cloneEmptyStore();
-}
-
-function main() {
-  const current = readCurrentStore();
-  current.questions[MODE] = ENTRY;
-
-  try {
-    fs.mkdirSync(path.dirname(STORE), { recursive: true });
-    fs.writeFileSync(STORE, JSON.stringify(current, null, 2), "utf8");
-  } catch (err) {
-    console.log(JSON.stringify({
-      ok: false,
-      error: "Could not write pending question cache: " + String(err && err.message ? err.message : err),
-    }));
-    return;
-  }
-
-  console.log(JSON.stringify({ ok: true }));
-}
-
-main();
-`;
-
-  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
-    .then((result) => {
-      try {
-        const data = JSON.parse(String(result || "").trim());
-        dispatch({
-          type: "PERSIST_CACHE_RESULT",
-          mode: safeMode,
-          ok: !!(data && data.ok),
-          error:
-            data && data.ok
-              ? null
-              : String(
-                  (data && data.error) ||
-                    "Could not persist pending question cache.",
-                ),
-        });
-      } catch {
-        dispatch({
-          type: "PERSIST_CACHE_RESULT",
-          mode: safeMode,
-          ok: false,
-          error: "Could not parse pending question cache persist response.",
-        });
-      }
-    })
-    .catch((err) => {
-      dispatch({
-        type: "PERSIST_CACHE_RESULT",
-        mode: safeMode,
-        ok: false,
-        error: `Pending question cache persist failed: ${String(err && err.message ? err.message : err)}`,
-      });
-    });
-};
-
-const loadWrongTopicCounts = (dispatch) => {
-  const nodeScript = `
-const fs = require("fs");
-
-const STORE = '${escapeForSingleQuotedShell(WRONG_TOPIC_COUNTS_STORE)}';
-
-function main() {
-  if (!fs.existsSync(STORE)) {
-    console.log(JSON.stringify({
-      ok: true,
-      counts: {},
-      warning: null,
-    }));
-    return;
-  }
-
-  let raw;
-  try {
-    raw = fs.readFileSync(STORE, "utf8");
-  } catch (err) {
-    console.log(JSON.stringify({
-      ok: false,
-      error: "Could not read wrong topic counts: " + String(err && err.message ? err.message : err),
-    }));
-    return;
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    console.log(JSON.stringify({
-      ok: true,
-      counts: {},
-      warning: "Wrong topic counts are malformed JSON. Using empty map.",
-    }));
-    return;
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    console.log(JSON.stringify({
-      ok: true,
-      counts: {},
-      warning: "Wrong topic counts schema is invalid. Using empty map.",
-    }));
-    return;
-  }
-
-  console.log(JSON.stringify({
-    ok: true,
-    counts: parsed,
-    warning: null,
-  }));
-}
-
-main();
-`;
-
-  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
-    .then((result) => {
-      try {
-        const data = JSON.parse(String(result || "").trim());
-        dispatch({
-          type: "LOAD_WRONG_TOPICS_RESULT",
-          ok: !!(data && data.ok),
-          counts:
-            data && data.counts && typeof data.counts === "object"
-              ? data.counts
-              : {},
-          warning:
-            data && typeof data.warning === "string" ? data.warning : null,
-          error:
-            data && data.ok
-              ? null
-              : String(
-                  (data && data.error) || "Could not load wrong topic counts.",
-                ),
-        });
-      } catch {
-        dispatch({
-          type: "LOAD_WRONG_TOPICS_RESULT",
-          ok: false,
-          counts: {},
-          warning: null,
-          error: "Could not parse wrong topic count load response.",
-        });
-      }
-    })
-    .catch((err) => {
-      dispatch({
-        type: "LOAD_WRONG_TOPICS_RESULT",
-        ok: false,
-        counts: {},
-        warning: null,
-        error: `Wrong topic count load failed: ${String(err && err.message ? err.message : err)}`,
-      });
-    });
-};
-
-const mutateWrongTopicCount = ({ topic, delta, deleteAtZero }, dispatch) => {
-  const normalizedTopic = normalizeWrongTopicKey(topic);
-  const safeDelta = Number.isFinite(Number(delta))
-    ? Math.floor(Number(delta))
-    : 0;
-  if (!safeDelta) return;
-
-  const nodeScript = `
-const fs = require("fs");
-const path = require("path");
-
-const STORE = '${escapeForSingleQuotedShell(WRONG_TOPIC_COUNTS_STORE)}';
-const TOPIC = ${JSON.stringify(normalizedTopic)};
-const DELTA = ${JSON.stringify(safeDelta)};
-const DELETE_AT_ZERO = ${JSON.stringify(!!deleteAtZero)};
-
-function toMap(raw) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
-    }
-    return parsed;
-  } catch {
-    return {};
-  }
-}
-
-function toNonNegativeNumber(value) {
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n) || n < 0) return 0;
-  return n;
-}
-
-function main() {
-  let map = {};
-
-  if (fs.existsSync(STORE)) {
-    try {
-      const raw = fs.readFileSync(STORE, "utf8");
-      map = toMap(raw);
-    } catch {
-      map = {};
-    }
-  }
-
-  const current = toNonNegativeNumber(map[TOPIC]);
-  const nextValue = Math.max(0, current + DELTA);
-  if (DELETE_AT_ZERO && nextValue === 0) {
-    delete map[TOPIC];
-  } else {
-    map[TOPIC] = nextValue;
-  }
-
-  try {
-    fs.mkdirSync(path.dirname(STORE), { recursive: true });
-    fs.writeFileSync(STORE, JSON.stringify(map, null, 2), "utf8");
-  } catch (err) {
-    console.log(JSON.stringify({
-      ok: false,
-      error: "Could not write wrong topic counts: " + String(err && err.message ? err.message : err),
-    }));
-    return;
-  }
-
-  console.log(JSON.stringify({ ok: true, counts: map }));
-}
-
-main();
-`;
-
-  run(`"${NODE}" <<'EOF'\n${nodeScript}\nEOF`)
-    .then((result) => {
-      try {
-        const data = JSON.parse(String(result || "").trim());
-        dispatch({
-          type: "MUTATE_WRONG_TOPIC_RESULT",
-          ok: !!(data && data.ok),
-          counts:
-            data && data.counts && typeof data.counts === "object"
-              ? data.counts
-              : null,
-          error:
-            data && data.ok
-              ? null
-              : String(
-                  (data && data.error) ||
-                    "Could not mutate wrong topic counts.",
-                ),
-        });
-      } catch {
-        dispatch({
-          type: "MUTATE_WRONG_TOPIC_RESULT",
-          ok: false,
-          counts: null,
-          error: "Could not parse wrong topic count mutation response.",
-        });
-      }
-    })
-    .catch((err) => {
-      dispatch({
-        type: "MUTATE_WRONG_TOPIC_RESULT",
-        ok: false,
-        counts: null,
-        error: `Wrong topic count mutation failed: ${String(err && err.message ? err.message : err)}`,
-      });
-    });
-};
-
-const generateStepQuestion = async (
+// Old one-pass "topic -> final question" generation was replaced here with a
+// four-stage pipeline: analysis -> planning -> generation -> validation/repair.
+const generateQuestionPipeline = async (
   { apiKey, mode, difficultyProfile, topicContext, generationId, topicKey },
   dispatch,
 ) => {
   const safeMode = normalizeModeKey(mode) || DEFAULT_MODE;
-  const { systemMessage, userMessage } = buildPromptMessages({
-    mode: safeMode,
-    difficultyProfile,
-    topicContext,
-  });
+  const normalizedTopicContext = normalizeTopicContext(topicContext);
+  if (!normalizedTopicContext) {
+    dispatch({
+      type: "GENERATE_RESULT",
+      mode: safeMode,
+      ok: false,
+      generationId,
+      topicKey,
+      error: "Question analysis failed: topic context is invalid.",
+    });
+    return;
+  }
 
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      stem: { type: "string" },
-      choices: {
-        type: "array",
-        minItems: 5,
-        maxItems: 5,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            key: { type: "string", enum: CHOICE_KEYS },
-            text: { type: "string" },
-            explanation: { type: "string" },
-          },
-          required: ["key", "text", "explanation"],
-        },
-      },
-      correctKey: { type: "string", enum: CHOICE_KEYS },
-      correctExplanation: { type: "string" },
-    },
-    required: ["stem", "choices", "correctKey", "correctExplanation"],
-  };
+  const promptDifficulty = getDifficultyForMode(safeMode);
+  const analysisTopicKey = makeAnalysisTopicKey(normalizedTopicContext);
+  let currentStage = "analysis";
 
-  let timeoutId = null;
   try {
-    const controller = new AbortController();
-    timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-5-mini",
-        input: [
-          {
-            role: "system",
-            content: [{ type: "input_text", text: systemMessage }],
-          },
-          {
-            role: "user",
-            content: [{ type: "input_text", text: userMessage }],
-          },
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "step1_question",
-            schema,
-            strict: true,
-          },
-        },
-      }),
+    const analysis = await getMemoizedTopicAnalysis({
+      apiKey,
+      mode: safeMode,
+      difficultyProfile,
+      topicContext: normalizedTopicContext,
+      topicKey: analysisTopicKey,
     });
 
-    if (!response.ok) {
-      const body = await response.text();
-      dispatch({
-        type: "GENERATE_RESULT",
-        mode: safeMode,
-        ok: false,
-        generationId,
-        topicKey,
-        error: `OpenAI request failed (${response.status}): ${body.slice(0, 300)}`,
-      });
-      return;
+    currentStage = "planning";
+    const plan = await planQuestion({
+      apiKey,
+      mode: safeMode,
+      difficultyProfile,
+      topicContext: normalizedTopicContext,
+      analysis,
+    });
+
+    currentStage = "generation";
+    const generatedQuestion = await generateQuestionFromPlan({
+      apiKey,
+      mode: safeMode,
+      difficultyProfile,
+      topicContext: normalizedTopicContext,
+      analysis,
+      plan,
+    });
+
+    currentStage = "validation";
+    const validation = await validateOrRepairQuestion({
+      apiKey,
+      mode: safeMode,
+      difficultyProfile,
+      topicContext: normalizedTopicContext,
+      analysis,
+      plan,
+      question: generatedQuestion,
+    });
+
+    const finalCandidate = validation.valid
+      ? generatedQuestion
+      : validation.repairedQuestion;
+    const normalizedFinalQuestion = normalizeGeneratedQuestion(finalCandidate, {
+      difficulty: promptDifficulty,
+      analysis,
+      plan,
+      topicContext: normalizedTopicContext,
+    });
+    if (!normalizedFinalQuestion.question) {
+      throw new Error(
+        normalizedFinalQuestion.error ||
+          "Validated question has invalid final shape.",
+      );
     }
 
-    const data = await response.json();
-    const text = extractResponseText(data);
-    const json = extractJsonFromText(text);
-
-    if (!json) {
-      dispatch({
-        type: "GENERATE_RESULT",
-        mode: safeMode,
-        ok: false,
-        generationId,
-        topicKey,
-        error: "OpenAI returned non-JSON content.",
-      });
-      return;
-    }
-
-    const normalized = normalizeQuestion(json);
-    if (!normalized.question) {
-      dispatch({
-        type: "GENERATE_RESULT",
-        mode: safeMode,
-        ok: false,
-        generationId,
-        topicKey,
-        error: normalized.error || "Model response has invalid shape.",
-      });
-      return;
-    }
-
-    const randomizedQuestion = randomizeQuestionChoices(normalized.question);
-    const normalizedTopicContext = normalizeTopicContext(topicContext);
-    const cachedEntry =
-      randomizedQuestion && normalizedTopicContext
-        ? {
-            difficulty: getDifficultyForMode(safeMode),
-            question: randomizedQuestion,
-            topicContext: normalizedTopicContext,
-            savedAt: new Date().toISOString(),
-          }
-        : null;
+    const randomizedQuestion = randomizeQuestionChoices(
+      normalizedFinalQuestion.question,
+    );
 
     dispatch({
       type: "GENERATE_RESULT",
@@ -1588,27 +2060,19 @@ const generateStepQuestion = async (
       generationId,
       topicKey,
       question: randomizedQuestion,
-      cachedEntry,
+      analysis,
+      plan,
+      validationIssues: validation.issues,
     });
-
-    if (cachedEntry) {
-      persistPendingQuestionForMode({ mode: safeMode, cachedEntry }, dispatch);
-    }
   } catch (err) {
-    const isTimeout =
-      err && typeof err === "object" && err.name === "AbortError";
     dispatch({
       type: "GENERATE_RESULT",
       mode: safeMode,
       ok: false,
       generationId,
       topicKey,
-      error: isTimeout
-        ? `OpenAI request timed out after ${Math.round(OPENAI_TIMEOUT_MS / 1000)}s.`
-        : `OpenAI request error: ${String(err && err.message ? err.message : err)}`,
+      error: `Question ${currentStage} failed: ${String(err && err.message ? err.message : err)}`,
     });
-  } finally {
-    if (timeoutId !== null) clearTimeout(timeoutId);
   }
 };
 
@@ -1616,6 +2080,9 @@ const emptyPendingByMode = () => makeModeMap(() => null);
 const emptyContextByMode = () => makeModeMap(() => null);
 const emptyQuestionByMode = () => makeModeMap(() => null);
 const emptyErrorByMode = () => makeModeMap(() => null);
+const emptyAnalysisByMode = () => makeModeMap(() => null);
+const emptyPlanByMode = () => makeModeMap(() => null);
+const emptyValidationIssuesByMode = () => makeModeMap(() => []);
 const emptySelectedByMode = () => makeModeMap(() => "");
 const emptyRevealedByMode = () => makeModeMap(() => false);
 const emptyResultByMode = () => makeModeMap(() => "");
@@ -1630,37 +2097,25 @@ const makeTopicKey = (mode, context) => {
   return `${safeMode}::${path}::${topic}`;
 };
 
-const getCachedTopicContextForMode = (baseState, mode) => {
-  const safeMode = normalizeModeKey(mode);
-  if (!safeMode) return null;
-  const cachedEntry =
-    baseState &&
-    baseState.cachedQuestionByMode &&
-    baseState.cachedQuestionByMode[safeMode] &&
-    typeof baseState.cachedQuestionByMode[safeMode] === "object"
-      ? baseState.cachedQuestionByMode[safeMode]
-      : null;
-  const topicContext =
-    cachedEntry && typeof cachedEntry === "object"
-      ? normalizeTopicContext(cachedEntry.topicContext)
-      : null;
-  return topicContext || null;
+const makeAnalysisTopicKey = (context) => {
+  if (!context || typeof context !== "object") return "";
+  const topic = typeof context.topic === "string" ? context.topic : "";
+  const path = typeof context.path === "string" ? context.path : "";
+  return `${path}::${topic}`;
 };
 
 const scheduleGenerationForContexts = (baseState, payload) => {
   const payloadContexts = payload && payload.contexts ? payload.contexts : null;
-  if (
-    !payloadContexts ||
-    !payloadContexts.easy ||
-    !payloadContexts.medium ||
-    !payloadContexts.hard
-  ) {
+  if (!payloadContexts || !payloadContexts.easy) {
     return {
       ...baseState,
       topicContextByMode: emptyContextByMode(),
       loadingByMode: emptyLoadingByMode(),
       errorByMode: emptyErrorByMode(),
       questionByMode: emptyQuestionByMode(),
+      analysisByMode: emptyAnalysisByMode(),
+      planByMode: emptyPlanByMode(),
+      validationIssuesByMode: emptyValidationIssuesByMode(),
       selectedKeyByMode: emptySelectedByMode(),
       revealedByMode: emptyRevealedByMode(),
       resultByMode: emptyResultByMode(),
@@ -1668,43 +2123,8 @@ const scheduleGenerationForContexts = (baseState, payload) => {
       latestGenerationIdByMode: emptyGenerationIdByMode(),
     };
   }
-
-  const cacheLoaded = !!baseState.cacheLoaded;
-  const wrongTopicLoaded = !!baseState.wrongTopicLoaded;
-  if (!cacheLoaded || !wrongTopicLoaded) {
-    const fallbackEasyContext = payloadContexts.easy;
-    return {
-      ...baseState,
-      activeMode: DEFAULT_MODE,
-      topicContextByMode: {
-        targeted: null,
-        easy: fallbackEasyContext,
-        medium: fallbackEasyContext,
-        hard: fallbackEasyContext,
-      },
-      loadingByMode: emptyLoadingByMode(),
-      errorByMode: emptyErrorByMode(),
-      pendingGenerationByMode: emptyPendingByMode(),
-    };
-  }
-
-  const wrongTopicCounts = normalizeWrongTopicCounts(
-    baseState.wrongTopicCounts,
-  );
-  const pickedTargetedTopic = pickWeightedTopic(wrongTopicCounts);
-  const targetedContext = pickedTargetedTopic
-    ? makeTargetedContextFromTopic(
-        pickedTargetedTopic,
-        wrongTopicCounts[pickedTargetedTopic],
-      )
-    : null;
-  const easyContextFromCache = getCachedTopicContextForMode(baseState, "easy");
-  const easyContext = easyContextFromCache || payloadContexts.easy || null;
   const contexts = {
-    targeted: targetedContext,
-    easy: easyContext,
-    medium: easyContext,
-    hard: easyContext,
+    easy: payloadContexts.easy || null,
   };
 
   const hasApiKey =
@@ -1714,6 +2134,9 @@ const scheduleGenerationForContexts = (baseState, payload) => {
   const nextLoadingByMode = emptyLoadingByMode();
   const nextQuestionByMode = emptyQuestionByMode();
   const nextErrorByMode = emptyErrorByMode();
+  const nextAnalysisByMode = emptyAnalysisByMode();
+  const nextPlanByMode = emptyPlanByMode();
+  const nextValidationIssuesByMode = emptyValidationIssuesByMode();
   const nextSelectedByMode = emptySelectedByMode();
   const nextRevealedByMode = emptyRevealedByMode();
   const nextResultByMode = emptyResultByMode();
@@ -1724,24 +2147,12 @@ const scheduleGenerationForContexts = (baseState, payload) => {
 
   for (const mode of QUESTION_MODES) {
     const context = contexts[mode];
-    const cachedEntry =
-      baseState.cachedQuestionByMode &&
-      baseState.cachedQuestionByMode[mode] &&
-      typeof baseState.cachedQuestionByMode[mode] === "object"
-        ? baseState.cachedQuestionByMode[mode]
-        : null;
-
-    if (cachedEntry) {
-      nextTopicContextByMode[mode] =
-        cachedEntry.topicContext || context || null;
-      nextQuestionByMode[mode] = cachedEntry.question || null;
-      nextLoadingByMode[mode] = false;
-      nextErrorByMode[mode] = null;
-      continue;
-    }
 
     nextTopicContextByMode[mode] = context || null;
     nextQuestionByMode[mode] = null;
+    nextAnalysisByMode[mode] = null;
+    nextPlanByMode[mode] = null;
+    nextValidationIssuesByMode[mode] = [];
 
     if (hasApiKey && context) {
       const nextGenerationId = nextGenerationCounter + 1;
@@ -1754,10 +2165,6 @@ const scheduleGenerationForContexts = (baseState, payload) => {
       nextGenerationIdByMode[mode] = nextGenerationId;
     } else {
       nextLoadingByMode[mode] = false;
-      if (mode === "targeted" && !context) {
-        nextErrorByMode[mode] =
-          "No targeted topics available yet. Miss a question first.";
-      }
     }
   }
 
@@ -1768,6 +2175,9 @@ const scheduleGenerationForContexts = (baseState, payload) => {
     loadingByMode: nextLoadingByMode,
     errorByMode: nextErrorByMode,
     questionByMode: nextQuestionByMode,
+    analysisByMode: nextAnalysisByMode,
+    planByMode: nextPlanByMode,
+    validationIssuesByMode: nextValidationIssuesByMode,
     selectedKeyByMode: nextSelectedByMode,
     revealedByMode: nextRevealedByMode,
     resultByMode: nextResultByMode,
@@ -1786,21 +2196,14 @@ export const initialState = {
   apiKeyLoading: false,
   apiKey: "",
   apiKeyWarning: null,
-  needsCacheLoad: true,
-  cacheLoaded: false,
-  cacheLoading: false,
-  cacheWarning: null,
-  cachedQuestionByMode: emptyCachedByMode(),
-  needsWrongTopicLoad: true,
-  wrongTopicLoaded: false,
-  wrongTopicLoading: false,
-  wrongTopicWarning: null,
-  wrongTopicCounts: {},
 
   activeMode: DEFAULT_MODE,
   loadingByMode: emptyLoadingByMode(),
   errorByMode: emptyErrorByMode(),
   questionByMode: emptyQuestionByMode(),
+  analysisByMode: emptyAnalysisByMode(),
+  planByMode: emptyPlanByMode(),
+  validationIssuesByMode: emptyValidationIssuesByMode(),
   selectedKeyByMode: emptySelectedByMode(),
   revealedByMode: emptyRevealedByMode(),
   resultByMode: emptyResultByMode(),
@@ -1814,77 +2217,6 @@ export const initialState = {
 };
 
 export const updateState = (event, prev) => {
-  if (event && event.type === "LOAD_WRONG_TOPICS_START") {
-    return {
-      ...prev,
-      needsWrongTopicLoad: false,
-      wrongTopicLoading: true,
-      wrongTopicWarning: null,
-    };
-  }
-
-  if (event && event.type === "LOAD_WRONG_TOPICS_RESULT") {
-    const next = {
-      ...prev,
-      needsWrongTopicLoad: false,
-      wrongTopicLoaded: true,
-      wrongTopicLoading: false,
-      wrongTopicWarning: event.ok ? event.warning || null : event.error || null,
-      wrongTopicCounts:
-        event.ok && event.counts && typeof event.counts === "object"
-          ? normalizeWrongTopicCounts(event.counts)
-          : {},
-    };
-
-    if (next.pendingCommandRefreshNonce !== null) {
-      return next;
-    }
-
-    const parsedPayload = parseCommandPayload(next.output);
-    if (parsedPayload) {
-      return scheduleGenerationForContexts(next, parsedPayload);
-    }
-
-    return next;
-  }
-
-  if (event && event.type === "LOAD_CACHE_START") {
-    return {
-      ...prev,
-      needsCacheLoad: false,
-      cacheLoading: true,
-      cacheWarning: null,
-    };
-  }
-
-  if (event && event.type === "LOAD_CACHE_RESULT") {
-    const next = {
-      ...prev,
-      needsCacheLoad: false,
-      cacheLoaded: true,
-      cacheLoading: false,
-      cacheWarning: event.ok ? event.warning || null : event.error || null,
-      cachedQuestionByMode:
-        event.ok &&
-        event.cachedQuestionByMode &&
-        typeof event.cachedQuestionByMode === "object"
-          ? {
-              targeted: event.cachedQuestionByMode.targeted || null,
-              easy: event.cachedQuestionByMode.easy || null,
-              medium: event.cachedQuestionByMode.medium || null,
-              hard: event.cachedQuestionByMode.hard || null,
-            }
-          : emptyCachedByMode(),
-    };
-
-    const parsedPayload = parseCommandPayload(next.output);
-    if (parsedPayload) {
-      return scheduleGenerationForContexts(next, parsedPayload);
-    }
-
-    return next;
-  }
-
   if (event && event.type === "LOAD_API_KEY_START") {
     return {
       ...prev,
@@ -1926,17 +2258,25 @@ export const updateState = (event, prev) => {
     return next;
   }
 
+  if (event && event.type === "AUTO_REFRESH_TICK") {
+    if (!prev.revealedByMode.easy) {
+      return prev;
+    }
+    const nextNonce = Number(prev.refreshNonce) + 1;
+    return {
+      ...prev,
+      refreshNonce: nextNonce,
+      pendingCommandRefreshNonce: nextNonce,
+      error: null,
+    };
+  }
+
   if (event && event.type === "REFRESH_CLICKED") {
     const nextNonce = Number(prev.refreshNonce) + 1;
     return {
       ...prev,
-      activeMode: DEFAULT_MODE,
       refreshNonce: nextNonce,
       pendingCommandRefreshNonce: nextNonce,
-      needsWrongTopicLoad: true,
-      wrongTopicLoaded: false,
-      wrongTopicLoading: false,
-      wrongTopicWarning: null,
       error: null,
     };
   }
@@ -1951,14 +2291,7 @@ export const updateState = (event, prev) => {
     };
   }
 
-  if (event && event.type === "MODE_SELECTED") {
-    const mode = normalizeModeKey(event.mode);
-    if (!mode) return prev;
-    return {
-      ...prev,
-      activeMode: mode,
-    };
-  }
+  // MODE_SELECTED is intentionally unused while single-question easy mode is active.
 
   if (event && event.type === "GENERATION_REQUEST_SENT") {
     const mode = normalizeModeKey(event.mode);
@@ -2003,6 +2336,18 @@ export const updateState = (event, prev) => {
           ...prev.questionByMode,
           [mode]: null,
         },
+        analysisByMode: {
+          ...prev.analysisByMode,
+          [mode]: null,
+        },
+        planByMode: {
+          ...prev.planByMode,
+          [mode]: null,
+        },
+        validationIssuesByMode: {
+          ...prev.validationIssuesByMode,
+          [mode]: [],
+        },
         errorByMode: {
           ...prev.errorByMode,
           [mode]: String(event.error || "Could not generate question."),
@@ -2036,12 +2381,23 @@ export const updateState = (event, prev) => {
         ...prev.questionByMode,
         [mode]: event.question || null,
       },
-      cachedQuestionByMode: {
-        ...prev.cachedQuestionByMode,
+      analysisByMode: {
+        ...prev.analysisByMode,
         [mode]:
-          event.cachedEntry && typeof event.cachedEntry === "object"
-            ? event.cachedEntry
+          event.analysis && typeof event.analysis === "object"
+            ? event.analysis
             : null,
+      },
+      planByMode: {
+        ...prev.planByMode,
+        [mode]:
+          event.plan && typeof event.plan === "object" ? event.plan : null,
+      },
+      validationIssuesByMode: {
+        ...prev.validationIssuesByMode,
+        [mode]: Array.isArray(event.validationIssues)
+          ? normalizeStringArray(event.validationIssues, { maxItems: 12 })
+          : [],
       },
       selectedKeyByMode: {
         ...prev.selectedKeyByMode,
@@ -2094,42 +2450,10 @@ export const updateState = (event, prev) => {
         ...prev.revealedByMode,
         [mode]: true,
       },
-      cachedQuestionByMode: {
-        ...prev.cachedQuestionByMode,
-        [mode]: null,
-      },
       resultByMode: {
         ...prev.resultByMode,
         [mode]: nextResult,
       },
-    };
-  }
-
-  if (event && event.type === "PERSIST_CACHE_RESULT") {
-    if (event.ok) return prev;
-    return {
-      ...prev,
-      cacheWarning:
-        String(event.error || "").trim() ||
-        "Could not persist pending question cache.",
-    };
-  }
-
-  if (event && event.type === "MUTATE_WRONG_TOPIC_RESULT") {
-    if (event.ok) {
-      return {
-        ...prev,
-        wrongTopicCounts:
-          event.counts && typeof event.counts === "object"
-            ? normalizeWrongTopicCounts(event.counts)
-            : prev.wrongTopicCounts,
-      };
-    }
-    return {
-      ...prev,
-      cacheWarning:
-        String(event.error || "").trim() ||
-        "Could not mutate wrong topic counts.",
     };
   }
 
@@ -2152,6 +2476,9 @@ export const updateState = (event, prev) => {
         loadingByMode: emptyLoadingByMode(),
         errorByMode: emptyErrorByMode(),
         questionByMode: emptyQuestionByMode(),
+        analysisByMode: emptyAnalysisByMode(),
+        planByMode: emptyPlanByMode(),
+        validationIssuesByMode: emptyValidationIssuesByMode(),
         selectedKeyByMode: emptySelectedByMode(),
         revealedByMode: emptyRevealedByMode(),
         resultByMode: emptyResultByMode(),
@@ -2171,21 +2498,11 @@ export const render = (
   {
     output,
     error,
-    cacheLoaded,
-    needsCacheLoad,
-    cacheLoading,
-    cacheWarning,
-    cachedQuestionByMode,
-    wrongTopicLoaded,
-    needsWrongTopicLoad,
-    wrongTopicLoading,
-    wrongTopicWarning,
     apiKeyLoaded,
     needsApiKeyLoad,
     apiKeyLoading,
     apiKey,
     apiKeyWarning,
-    activeMode,
     loadingByMode,
     errorByMode,
     questionByMode,
@@ -2204,20 +2521,6 @@ export const render = (
     setTimeout(() => {
       dispatch({ type: "LOAD_API_KEY_START" });
       loadApiKey(dispatch);
-    }, 0);
-  }
-
-  if (needsCacheLoad && !cacheLoaded && !cacheLoading) {
-    setTimeout(() => {
-      dispatch({ type: "LOAD_CACHE_START" });
-      loadPendingQuestionsCache(dispatch);
-    }, 0);
-  }
-
-  if (needsWrongTopicLoad && !wrongTopicLoaded && !wrongTopicLoading) {
-    setTimeout(() => {
-      dispatch({ type: "LOAD_WRONG_TOPICS_START" });
-      loadWrongTopicCounts(dispatch);
     }, 0);
   }
 
@@ -2255,8 +2558,7 @@ export const render = (
     );
   }
 
-  const mode = normalizeModeKey(activeMode) || DEFAULT_MODE;
-  const activeProfile = DIFFICULTY_PROFILES[mode];
+  const mode = "easy";
   const contexts = parsedPayload.contexts;
   const activeContext = topicContextByMode[mode] || contexts[mode];
   const commandWarning =
@@ -2289,35 +2591,33 @@ export const render = (
   }
 
   if (hasApiKey) {
-    for (const modeKey of QUESTION_MODES) {
-      const pending = pendingGenerationByMode[modeKey];
-      const context = topicContextByMode[modeKey];
-      if (!pending || !context) continue;
-
-      const requestKey = `${modeKey}::${pending.generationId}::${pending.topicKey}`;
-      if (scheduledGenerationRequests.has(requestKey)) continue;
-
-      scheduledGenerationRequests.add(requestKey);
-      setTimeout(() => {
-        scheduledGenerationRequests.delete(requestKey);
-        dispatch({
-          type: "GENERATION_REQUEST_SENT",
-          mode: modeKey,
-          topicKey: pending.topicKey,
-          generationId: pending.generationId,
-        });
-        generateStepQuestion(
-          {
-            apiKey: apiKey.trim(),
-            mode: modeKey,
-            difficultyProfile: DIFFICULTY_PROFILES[modeKey],
-            topicContext: context,
-            generationId: pending.generationId,
+    const pending = pendingGenerationByMode.easy;
+    const context = topicContextByMode.easy;
+    if (pending && context) {
+      const requestKey = `easy::${pending.generationId}::${pending.topicKey}`;
+      if (!scheduledGenerationRequests.has(requestKey)) {
+        scheduledGenerationRequests.add(requestKey);
+        setTimeout(() => {
+          scheduledGenerationRequests.delete(requestKey);
+          dispatch({
+            type: "GENERATION_REQUEST_SENT",
+            mode: "easy",
             topicKey: pending.topicKey,
-          },
-          dispatch,
-        );
-      }, 0);
+            generationId: pending.generationId,
+          });
+          generateQuestionPipeline(
+            {
+              apiKey: apiKey.trim(),
+              mode: "easy",
+              difficultyProfile: DIFFICULTY_PROFILES.easy,
+              topicContext: context,
+              generationId: pending.generationId,
+              topicKey: pending.topicKey,
+            },
+            dispatch,
+          );
+        }, 0);
+      }
     }
   }
 
@@ -2349,77 +2649,6 @@ export const render = (
   const onRefresh = (e) => {
     e.stopPropagation();
     dispatch({ type: "REFRESH_CLICKED" });
-  };
-
-  const persistQuestionRemoval = (modeKey) => {
-    const safeMode = normalizeModeKey(modeKey);
-    if (!safeMode) return;
-    const requestKey = `${safeMode}::remove`;
-    if (scheduledCacheMutationRequests.has(requestKey)) return;
-    scheduledCacheMutationRequests.add(requestKey);
-    setTimeout(() => {
-      scheduledCacheMutationRequests.delete(requestKey);
-      persistPendingQuestionForMode(
-        { mode: safeMode, cachedEntry: null },
-        dispatch,
-      );
-    }, 0);
-  };
-
-  const persistWrongTopicIncrement = ({ modeKey, topic, question }) => {
-    const safeMode = normalizeModeKey(modeKey);
-    if (!safeMode) return;
-    const safeTopic = normalizeWrongTopicKey(topic);
-    const questionObject =
-      question && typeof question === "object" ? question : {};
-    const dedupeQuestionKey =
-      (typeof questionObject.stem === "string"
-        ? questionObject.stem.trim()
-        : "") ||
-      normalizeChoiceKey(questionObject.correctKey) ||
-      "unknown-question";
-    const requestKey = `${safeMode}::${safeTopic}::${dedupeQuestionKey}`;
-    if (scheduledWrongTopicMutationRequests.has(requestKey)) return;
-    scheduledWrongTopicMutationRequests.add(requestKey);
-    setTimeout(() => {
-      scheduledWrongTopicMutationRequests.delete(requestKey);
-      mutateWrongTopicCount(
-        {
-          topic: safeTopic,
-          delta: 1,
-          deleteAtZero: false,
-        },
-        dispatch,
-      );
-    }, 0);
-  };
-
-  const persistTargetedCorrectDecrement = ({ modeKey, topic, question }) => {
-    const safeMode = normalizeModeKey(modeKey);
-    if (safeMode !== "targeted") return;
-    const safeTopic = normalizeWrongTopicKey(topic);
-    const questionObject =
-      question && typeof question === "object" ? question : {};
-    const dedupeQuestionKey =
-      (typeof questionObject.stem === "string"
-        ? questionObject.stem.trim()
-        : "") ||
-      normalizeChoiceKey(questionObject.correctKey) ||
-      "unknown-question";
-    const requestKey = `${safeMode}::decrement::${safeTopic}::${dedupeQuestionKey}`;
-    if (scheduledWrongTopicMutationRequests.has(requestKey)) return;
-    scheduledWrongTopicMutationRequests.add(requestKey);
-    setTimeout(() => {
-      scheduledWrongTopicMutationRequests.delete(requestKey);
-      mutateWrongTopicCount(
-        {
-          topic: safeTopic,
-          delta: -1,
-          deleteAtZero: true,
-        },
-        dispatch,
-      );
-    }, 0);
   };
 
   const onTopicChatGPT = (e) => {
@@ -2477,53 +2706,12 @@ export const render = (
     run(`open '${escapeForSingleQuotedShell(revealedTopicUrl)}'`);
   };
 
-  const getModeButtonClassName = (modeKey) => {
-    const classes = ["modeBtn"];
-    if (mode === modeKey) classes.push("modeBtnActive");
-    const modeResult =
-      resultByMode && typeof resultByMode[modeKey] === "string"
-        ? resultByMode[modeKey]
-        : "";
-    if (modeResult === "correct") classes.push("modeBtnCorrect");
-    if (modeResult === "incorrect") classes.push("modeBtnWrong");
-    return classes.join(" ");
-  };
-
   return (
     <div className="card">
       <div className="header">
         <div className="title">USMLE Question</div>
         <div className="headerBtns">
-          <button
-            className={getModeButtonClassName("targeted")}
-            onClick={() =>
-              dispatch({ type: "MODE_SELECTED", mode: "targeted" })
-            }
-            title="Targeted mode (medium difficulty)"
-          >
-            {DIFFICULTY_PROFILES.targeted.emoji}
-          </button>
-          <button
-            className={getModeButtonClassName("easy")}
-            onClick={() => dispatch({ type: "MODE_SELECTED", mode: "easy" })}
-            title="Easy mode"
-          >
-            {DIFFICULTY_PROFILES.easy.emoji}
-          </button>
-          <button
-            className={getModeButtonClassName("medium")}
-            onClick={() => dispatch({ type: "MODE_SELECTED", mode: "medium" })}
-            title="Medium mode"
-          >
-            {DIFFICULTY_PROFILES.medium.emoji}
-          </button>
-          <button
-            className={getModeButtonClassName("hard")}
-            onClick={() => dispatch({ type: "MODE_SELECTED", mode: "hard" })}
-            title="Hard mode"
-          >
-            {DIFFICULTY_PROFILES.hard.emoji}
-          </button>
+          {/* Multi-mode buttons intentionally hidden while only easy mode is active. */}
           <button
             className="refreshBtn"
             onClick={onRefresh}
@@ -2544,10 +2732,6 @@ export const render = (
 
       <div className="cardBody">
         {apiKeyWarning ? <div className="warn">{apiKeyWarning}</div> : null}
-        {cacheWarning ? <div className="warn">{cacheWarning}</div> : null}
-        {wrongTopicWarning ? (
-          <div className="warn">{wrongTopicWarning}</div>
-        ) : null}
         {commandWarning ? <div className="warn">{commandWarning}</div> : null}
 
         {!hasApiKey ? (
@@ -2558,7 +2742,7 @@ export const render = (
 
         {activeLoading ? (
           <div className="loading">
-            Generating {activeProfile.label} Step 1 question...
+            Generating Step 1 question...
           </div>
         ) : null}
 
@@ -2612,40 +2796,9 @@ export const render = (
                   <div key={key} className={`choiceWrap ${stateClass}`}>
                     <button
                       className={`choiceBtn ${selectedResultClass}`}
-                      onClick={() => {
-                        const alreadyRevealed = !!revealed;
-                        const wasCorrect =
-                          !!activeQuestion &&
-                          typeof activeQuestion === "object" &&
-                          normalizeChoiceKey(activeQuestion.correctKey) === key;
-                        const topicForWrongCount =
-                          activeContext &&
-                          typeof activeContext.topic === "string"
-                            ? activeContext.topic
-                            : "";
-                        dispatch({ type: "SELECT_ANSWER", mode, key });
-                        if (!alreadyRevealed && !wasCorrect) {
-                          persistWrongTopicIncrement({
-                            modeKey: mode,
-                            topic: topicForWrongCount,
-                            question: activeQuestion,
-                          });
-                        }
-                        if (
-                          !alreadyRevealed &&
-                          wasCorrect &&
-                          mode === "targeted"
-                        ) {
-                          persistTargetedCorrectDecrement({
-                            modeKey: mode,
-                            topic: topicForWrongCount,
-                            question: activeQuestion,
-                          });
-                        }
-                        if (!alreadyRevealed && cachedQuestionByMode[mode]) {
-                          persistQuestionRemoval(mode);
-                        }
-                      }}
+                      onClick={() =>
+                        dispatch({ type: "SELECT_ANSWER", mode, key })
+                      }
                     >
                       <span className="choiceKey">{key}.</span>
                       <span className="choiceText">{choice.text}</span>
